@@ -1,0 +1,69 @@
+# Déploiement de production : docker compose up -d
+# Prérequis : fichier .env (voir .env.example) et un nom de domaine pointant vers le serveur.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sbs
+      POSTGRES_USER: sbs
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD requis}
+      TZ: Africa/Conakry
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sbs"]
+      interval: 10s
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://sbs:${DB_PASSWORD}@db:5432/sbs
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY requis}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COOKIE_SECURE: "true"
+      BACKUP_DIR: /backups
+    volumes:
+      - uploads:/data/uploads
+      - ./backups:/backups:ro
+
+  # Reverse proxy HTTPS (certificat Let's Encrypt automatique)
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN requis}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+  # Sauvegarde automatique quotidienne, chiffrée, avec rotation
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on: [db]
+    environment:
+      PGHOST: db
+      PGUSER: sbs
+      PGPASSWORD: ${DB_PASSWORD}
+      PGDATABASE: sbs
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE requis}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      TZ: Africa/Conakry
+    volumes:
+      - ./backups:/backups
+      - uploads:/uploads:ro
+      - ./deploy/backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache openssl >/dev/null && while true; do if [ \"$$(date +%H)\" = \"$$(printf %02d $$BACKUP_HOUR)\" ]; then /bin/sh /backup.sh; sleep 3700; fi; sleep 600; done"]
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:

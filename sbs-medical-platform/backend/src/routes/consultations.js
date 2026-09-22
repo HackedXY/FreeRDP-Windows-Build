@@ -1,0 +1,302 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { query, tx } from '../db/pool.js';
+import { ah, parse, notFound, badRequest, forbidden } from '../lib/errors.js';
+import { requirePerm, can } from '../lib/auth.js';
+import { audit, diff } from '../lib/audit.js';
+import { notify } from '../lib/notify.js';
+import { encrypt, decrypt } from '../lib/crypto.js';
+import { nextNumber } from '../lib/numbering.js';
+import { paging, addPeriod, fmtGNF, refreshPaymentStatus } from '../lib/helpers.js';
+
+const router = Router();
+const VITALS = ['weight_kg', 'temperature_c', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'spo2'];
+const CLINICAL = ['observations', 'diagnosis', 'treatment'];
+const STATUS_LABEL = { en_attente: 'En attente', en_cours: 'En cours', terminee: 'Terminée', annulee: 'Annulée' };
+
+const num = (min, max) => z.coerce.number().min(min).max(max).optional().nullable();
+const baseSchema = z.object({
+  patient_id: z.coerce.number().int().positive(),
+  doctor_id: z.coerce.number().int().positive().optional().nullable(),
+  consulted_at: z.string().datetime({ offset: true }).optional().nullable().or(z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)),
+  reason: z.string().trim().max(500).optional().nullable(),
+  weight_kg: num(0, 400), temperature_c: num(25, 45), bp_systolic: num(40, 300), bp_diastolic: num(20, 200),
+  heart_rate: num(20, 300), spo2: num(40, 100),
+  observations: z.string().max(10000).optional().nullable(),
+  diagnosis: z.string().max(5000).optional().nullable(),
+  treatment: z.string().max(5000).optional().nullable(),
+  status: z.enum(['en_attente', 'en_cours', 'terminee']).optional(),
+  acts: z.array(z.object({ act_id: z.coerce.number().int().positive(), quantity: z.coerce.number().int().min(1).default(1) })).optional(),
+});
+
+function present(c, user) {
+  const out = { ...c };
+  const medical = can(user, 'patients.view_medical') || can(user, 'consultations.diagnose');
+  for (const f of CLINICAL) out[f] = medical ? decrypt(c[f]) : undefined;
+  if (!medical) out.clinical_restricted = true;
+  return out;
+}
+
+async function recomputeAmount(db, id) {
+  await db.query(
+    `UPDATE consultations SET amount = coalesce((SELECT sum(quantity * unit_price) FROM consultation_acts WHERE consultation_id = $1), 0),
+       updated_at = now() WHERE id = $1`, [id]);
+  await refreshPaymentStatus(db, 'consultation', id);
+}
+
+async function addActs(db, req, consultationId, acts) {
+  for (const a of acts) {
+    const { rows: [act] } = await db.query('SELECT id, name, price FROM medical_acts WHERE id = $1 AND active', [a.act_id]);
+    if (!act) throw badRequest(`Acte inconnu ou inactif (#${a.act_id})`);
+    await db.query(
+      `INSERT INTO consultation_acts (consultation_id, act_id, quantity, unit_price, performed_by) VALUES ($1,$2,$3,$4,$5)`,
+      [consultationId, act.id, a.quantity, act.price, req.user.id]);
+  }
+  await recomputeAmount(db, consultationId);
+}
+
+async function getFull(db, id, user) {
+  const { rows: [c] } = await db.query(
+    `SELECT c.*, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name, p.sex AS patient_sex, p.birth_date AS patient_birth_date,
+       d.first_name || ' ' || d.last_name AS doctor_name
+     FROM consultations c JOIN patients p ON p.id = c.patient_id LEFT JOIN users d ON d.id = c.doctor_id WHERE c.id = $1`, [id]);
+  if (!c) throw notFound('Consultation introuvable');
+  const { rows: acts } = await db.query(
+    `SELECT ca.*, a.name, u.first_name || ' ' || u.last_name AS performed_by_name
+     FROM consultation_acts ca JOIN medical_acts a ON a.id = ca.act_id LEFT JOIN users u ON u.id = ca.performed_by
+     WHERE ca.consultation_id = $1 ORDER BY ca.id`, [id]);
+  const out = present(c, user);
+  out.acts = acts;
+  if (can(user, 'patients.view_medical') || can(user, 'prescriptions.create')) {
+    const { rows } = await db.query(
+      `SELECT pr.*, coalesce(json_agg(pi.* ORDER BY pi.id) FILTER (WHERE pi.id IS NOT NULL), '[]') AS items
+       FROM prescriptions pr LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id
+       WHERE pr.consultation_id = $1 GROUP BY pr.id ORDER BY pr.id`, [id]);
+    out.prescriptions = rows;
+  }
+  if (can(user, 'lab.view') || can(user, 'lab.request')) {
+    const { rows } = await db.query(
+      `SELECT lr.id, lr.number, lr.status, lr.amount, lr.payment_status, string_agg(t.name, ', ' ORDER BY t.name) AS exams
+       FROM lab_requests lr JOIN lab_request_items i ON i.request_id = lr.id JOIN lab_exam_types t ON t.id = i.exam_type_id
+       WHERE lr.consultation_id = $1 GROUP BY lr.id ORDER BY lr.id`, [id]);
+    out.lab_requests = rows;
+  }
+  if (can(user, 'payments.view')) {
+    const { rows } = await db.query(
+      `SELECT id, number, receipt_number, amount, method, status, created_at FROM payments
+       WHERE source_type = 'consultation' AND source_id = $1 ORDER BY id`, [id]);
+    out.payments = rows;
+  }
+  return out;
+}
+
+router.get('/', requirePerm('consultations.view'), ah(async (req, res) => {
+  const { limit, offset } = paging(req);
+  const where = []; const vals = [];
+  addPeriod(where, vals, 'c.consulted_at', req.query);
+  if (req.query.status) { vals.push(req.query.status); where.push(`c.status = $${vals.length}`); }
+  if (req.query.payment_status) { vals.push(req.query.payment_status); where.push(`c.payment_status = $${vals.length}`); }
+  if (req.query.doctor_id) { vals.push(Number(req.query.doctor_id)); where.push(`c.doctor_id = $${vals.length}`); }
+  if (req.query.patient_id) { vals.push(Number(req.query.patient_id)); where.push(`c.patient_id = $${vals.length}`); }
+  if (req.query.q) {
+    vals.push(`%${String(req.query.q).toLowerCase()}%`);
+    where.push(`(lower(c.number) LIKE $${vals.length} OR lower(p.first_name || ' ' || p.last_name) LIKE $${vals.length} OR lower(p.patient_number) LIKE $${vals.length})`);
+  }
+  vals.push(limit, offset);
+  const { rows } = await query(
+    `SELECT c.id, c.number, c.consulted_at, c.reason, c.status, c.amount, c.paid_amount, c.payment_status,
+       c.patient_id, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name,
+       d.first_name || ' ' || d.last_name AS doctor_name, count(*) OVER()::int AS total
+     FROM consultations c JOIN patients p ON p.id = c.patient_id LEFT JOIN users d ON d.id = c.doctor_id
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY c.consulted_at DESC LIMIT $${vals.length - 1} OFFSET $${vals.length}`, vals);
+  res.json({ items: rows.map(({ total, ...r }) => r), total: rows[0]?.total || 0 });
+}));
+
+router.get('/:id', requirePerm('consultations.view'), ah(async (req, res) => {
+  res.json(await getFull({ query }, Number(req.params.id), req.user));
+}));
+
+router.post('/', requirePerm('consultations.create'), ah(async (req, res) => {
+  const d = parse(baseSchema, req.body);
+  if (CLINICAL.some((f) => d[f]) && !can(req.user, 'consultations.diagnose')) throw forbidden('Saisie du diagnostic non autorisée.');
+  if (VITALS.some((f) => d[f] != null) && !can(req.user, 'consultations.vitals')) throw forbidden('Saisie des constantes non autorisée.');
+  const out = await tx(async (db) => {
+    const { rows: [p] } = await db.query('SELECT id, patient_number, first_name, last_name FROM patients WHERE id = $1 AND archived_at IS NULL', [d.patient_id]);
+    if (!p) throw badRequest('Patient introuvable');
+    const doctorId = d.doctor_id ?? (req.user.roleCode === 'medecin' ? req.user.id : null);
+    const number = await nextNumber(db, 'consultation', 'CONS');
+    const { rows: [c] } = await db.query(
+      `INSERT INTO consultations (site_id, number, patient_id, doctor_id, consulted_at, reason, ${VITALS.join(', ')},
+         observations, diagnosis, treatment, status, created_by)
+       VALUES ($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+      [req.user.siteId, number, p.id, doctorId, d.consulted_at || null, d.reason || null, ...VITALS.map((f) => d[f] ?? null),
+        ...CLINICAL.map((f) => encrypt(d[f] || null)), d.status || 'en_attente', req.user.id]);
+    if (d.acts?.length) await addActs(db, req, c.id, d.acts);
+    await audit(db, req.ctx, {
+      action: 'consultation.create', entityType: 'consultation', entityId: c.id,
+      summary: `Consultation ${number} — ${p.first_name} ${p.last_name}`, feed: { kind: 'consultation' },
+    });
+    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
+    return getFull(db, c.id, req.user);
+  });
+  res.status(201).json(out);
+}));
+
+router.put('/:id', requirePerm('consultations.update', 'consultations.vitals', 'consultations.diagnose'), ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const d = parse(baseSchema.omit({ patient_id: true, acts: true }).partial(), req.body);
+  const out = await tx(async (db) => {
+    const { rows: [before] } = await db.query('SELECT * FROM consultations WHERE id = $1 FOR UPDATE', [id]);
+    if (!before) throw notFound('Consultation introuvable');
+    if (before.status === 'annulee') throw badRequest('Consultation annulée : modification impossible.');
+    const sets = []; const vals = [];
+    const set = (f, v) => { vals.push(v); sets.push(`${f} = $${vals.length}`); };
+    const general = ['doctor_id', 'consulted_at', 'reason', 'status'];
+    if (general.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.update')) throw forbidden('Modification de la consultation non autorisée.');
+    if (VITALS.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.vitals')) throw forbidden('Saisie des constantes non autorisée.');
+    if (CLINICAL.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.diagnose')) throw forbidden('Saisie du diagnostic non autorisée.');
+    for (const f of [...general, ...VITALS]) if (d[f] !== undefined) set(f, d[f]);
+    const clinicalChanged = [];
+    for (const f of CLINICAL) {
+      if (d[f] === undefined || (decrypt(before[f]) || null) === (d[f] || null)) continue;
+      set(f, encrypt(d[f] || null)); clinicalChanged.push(f);
+    }
+    if (!sets.length) return getFull(db, id, req.user);
+    vals.push(id);
+    await db.query(`UPDATE consultations SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals);
+    const changes = diff(before, d, [...general, ...VITALS]);
+    const statusChanged = d.status && d.status !== before.status;
+    const { rows: [p] } = await db.query('SELECT first_name, last_name FROM patients WHERE id = $1', [before.patient_id]);
+    await audit(db, req.ctx, {
+      action: statusChanged ? 'consultation.status' : 'consultation.update', entityType: 'consultation', entityId: id,
+      summary: statusChanged
+        ? `Consultation ${STATUS_LABEL[d.status].toLowerCase()} — ${p.first_name} ${p.last_name} (${before.number})`
+        : `Mise à jour de la consultation ${before.number}`,
+      oldValue: { ...(changes?.oldValue || {}), ...Object.fromEntries(clinicalChanged.map((f) => [f, '[donnée médicale]'])) },
+      newValue: { ...(changes?.newValue || {}), ...Object.fromEntries(clinicalChanged.map((f) => [f, '[modifiée]'])) },
+      feed: statusChanged ? { kind: 'consultation' } : false,
+    });
+    if (statusChanged && d.status === 'terminee') {
+      const { rows: [c] } = await db.query('SELECT amount, payment_status FROM consultations WHERE id = $1', [id]);
+      if (c.amount > 0 && c.payment_status !== 'payee') {
+        await notify(db, req.ctx, {
+          permission: 'payments.create', type: 'to_pay', icon: '💳', title: 'Consultation à encaisser',
+          body: `${p.first_name} ${p.last_name} — ${fmtGNF(c.amount)}`, link: `/paiements/nouveau?source=consultation&id=${id}`,
+        });
+      }
+      req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
+    }
+    return getFull(db, id, req.user);
+  });
+  res.json(out);
+}));
+
+router.post('/:id/acts', requirePerm('acts.perform'), ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const { acts } = parse(z.object({ acts: baseSchema.shape.acts.unwrap().min(1) }), req.body);
+  const out = await tx(async (db) => {
+    const { rows: [c] } = await db.query('SELECT * FROM consultations WHERE id = $1 FOR UPDATE', [id]);
+    if (!c) throw notFound('Consultation introuvable');
+    if (c.status === 'annulee') throw badRequest('Consultation annulée.');
+    await addActs(db, req, id, acts);
+    const { rows: [after] } = await db.query('SELECT amount FROM consultations WHERE id = $1', [id]);
+    await audit(db, req.ctx, {
+      action: 'consultation.acts_add', entityType: 'consultation', entityId: id,
+      summary: `Actes ajoutés à ${c.number}`, oldValue: { amount: c.amount }, newValue: { amount: after.amount, acts }, feed: false,
+    });
+    return getFull(db, id, req.user);
+  });
+  res.json(out);
+}));
+
+router.delete('/:id/acts/:actLineId', requirePerm('acts.perform'), ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const { reason } = parse(z.object({ reason: z.string().trim().min(3, 'motif obligatoire') }), req.body);
+  const out = await tx(async (db) => {
+    const { rows: [c] } = await db.query('SELECT * FROM consultations WHERE id = $1 FOR UPDATE', [id]);
+    if (!c) throw notFound('Consultation introuvable');
+    if (c.paid_amount > 0) throw badRequest('Des paiements existent : annulez d\'abord le paiement pour retirer un acte.');
+    const { rows: [line] } = await db.query(
+      `DELETE FROM consultation_acts ca USING medical_acts a WHERE ca.id = $1 AND ca.consultation_id = $2 AND a.id = ca.act_id
+       RETURNING ca.*, a.name`, [Number(req.params.actLineId), id]);
+    if (!line) throw notFound('Acte introuvable');
+    await recomputeAmount(db, id);
+    await audit(db, req.ctx, {
+      action: 'consultation.acts_remove', entityType: 'consultation', entityId: id,
+      summary: `Acte retiré de ${c.number} : ${line.name}`, oldValue: line, reason,
+    });
+    return getFull(db, id, req.user);
+  });
+  res.json(out);
+}));
+
+router.post('/:id/cancel', requirePerm('consultations.cancel'), ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const { reason } = parse(z.object({ reason: z.string().trim().min(3, 'motif obligatoire') }), req.body);
+  await tx(async (db) => {
+    const { rows: [c] } = await db.query('SELECT * FROM consultations WHERE id = $1 FOR UPDATE', [id]);
+    if (!c) throw notFound('Consultation introuvable');
+    if (c.status === 'annulee') throw badRequest('Déjà annulée.');
+    if (c.paid_amount > 0) throw badRequest('Consultation déjà (partiellement) payée : annulez ou remboursez d\'abord le paiement.');
+    await db.query(`UPDATE consultations SET status = 'annulee', cancel_reason = $2, updated_at = now() WHERE id = $1`, [id, reason]);
+    await audit(db, req.ctx, {
+      action: 'consultation.cancel', entityType: 'consultation', entityId: id, summary: `Annulation de la consultation ${c.number}`,
+      oldValue: { status: c.status }, newValue: { status: 'annulee' }, reason,
+    });
+  });
+  res.json({ ok: true });
+}));
+
+const prescriptionSchema = z.object({
+  notes: z.string().max(2000).optional().nullable(),
+  items: z.array(z.object({
+    product_id: z.coerce.number().int().positive().optional().nullable(),
+    drug_name: z.string().trim().min(1).max(200),
+    dosage: z.string().max(100).optional().nullable(),
+    frequency: z.string().max(100).optional().nullable(),
+    duration: z.string().max(100).optional().nullable(),
+    quantity: z.coerce.number().int().min(0).optional().nullable(),
+    instructions: z.string().max(500).optional().nullable(),
+  })).min(1),
+});
+
+router.post('/:id/prescriptions', requirePerm('prescriptions.create'), ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const d = parse(prescriptionSchema, req.body);
+  const out = await tx(async (db) => {
+    const { rows: [c] } = await db.query('SELECT id, number, patient_id, status FROM consultations WHERE id = $1', [id]);
+    if (!c) throw notFound('Consultation introuvable');
+    if (c.status === 'annulee') throw badRequest('Consultation annulée.');
+    const { rows: [pr] } = await db.query(
+      'INSERT INTO prescriptions (consultation_id, patient_id, prescribed_by, notes) VALUES ($1,$2,$3,$4) RETURNING *',
+      [id, c.patient_id, req.user.id, d.notes || null]);
+    for (const it of d.items) {
+      await db.query(
+        `INSERT INTO prescription_items (prescription_id, product_id, drug_name, dosage, frequency, duration, quantity, instructions)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [pr.id, it.product_id || null, it.drug_name, it.dosage || null, it.frequency || null, it.duration || null, it.quantity ?? null, it.instructions || null]);
+    }
+    await audit(db, req.ctx, {
+      action: 'prescription.create', entityType: 'prescription', entityId: pr.id,
+      summary: `Prescription (${d.items.length} ligne(s)) — consultation ${c.number}`, feed: false,
+    });
+    return getFull(db, id, req.user);
+  });
+  res.status(201).json(out);
+}));
+
+// Prescription pour la pharmacie (sans données cliniques)
+router.get('/prescriptions/:pid', requirePerm('pharmacy.sell', 'prescriptions.create', 'patients.view_medical'), ah(async (req, res) => {
+  const { rows: [pr] } = await query(
+    `SELECT pr.id, pr.patient_id, pr.created_at, pr.notes, p.first_name || ' ' || p.last_name AS patient_name, p.patient_number,
+       u.first_name || ' ' || u.last_name AS prescriber,
+       coalesce(json_agg(pi.* ORDER BY pi.id) FILTER (WHERE pi.id IS NOT NULL), '[]') AS items
+     FROM prescriptions pr JOIN patients p ON p.id = pr.patient_id LEFT JOIN users u ON u.id = pr.prescribed_by
+     LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id WHERE pr.id = $1 GROUP BY pr.id, p.id, u.id`,
+    [Number(req.params.pid)]);
+  if (!pr) throw notFound('Prescription introuvable');
+  res.json(pr);
+}));
+
+export default router;
