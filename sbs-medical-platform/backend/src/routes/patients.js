@@ -8,6 +8,8 @@ import { notify } from '../lib/notify.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { nextNumber } from '../lib/numbering.js';
 import { paging } from '../lib/helpers.js';
+import { canClinical, canLabResults, canPrescriptions, canAppointmentDetails, decJson } from '../lib/medical.js';
+import { presentPrescription } from './consultations.js';
 
 const router = Router();
 const MEDICAL = ['medical_history', 'allergies', 'blood_group', 'notes'];
@@ -77,30 +79,38 @@ router.get('/:id/history', requirePerm('patients.view'), ah(async (req, res) => 
          d.first_name || ' ' || d.last_name AS doctor
        FROM consultations c LEFT JOIN users d ON d.id = c.doctor_id WHERE c.patient_id = $1 ORDER BY c.consulted_at DESC`, [id]);
     const medical = can(u, 'patients.view_medical');
-    out.consultations = rows.map((r) => ({ ...r, diagnosis: medical ? decrypt(r.diagnosis) : undefined, treatment: medical ? decrypt(r.treatment) : undefined }));
+    const clinical = canClinical(u);
+    out.consultations = rows.map((r) => ({
+      ...r, reason: clinical ? decrypt(r.reason) : undefined,
+      diagnosis: medical ? decrypt(r.diagnosis) : undefined, treatment: medical ? decrypt(r.treatment) : undefined,
+    }));
     const { rows: acts } = await query(
       `SELECT ca.id, ca.performed_at, ca.quantity, ca.unit_price, a.name, c.number AS consultation_number
        FROM consultation_acts ca JOIN medical_acts a ON a.id = ca.act_id JOIN consultations c ON c.id = ca.consultation_id
        WHERE c.patient_id = $1 ORDER BY ca.performed_at DESC`, [id]);
     out.acts = acts;
   }
-  if (can(u, 'patients.view_medical')) {
+  if (canPrescriptions(u)) {
     const { rows } = await query(
-      `SELECT pr.id, pr.created_at, pr.notes, u.first_name || ' ' || u.last_name AS prescriber,
-         coalesce(json_agg(pi.* ORDER BY pi.id) FILTER (WHERE pi.id IS NOT NULL), '[]') AS items
-       FROM prescriptions pr LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id
-       LEFT JOIN users u ON u.id = pr.prescribed_by
-       WHERE pr.patient_id = $1 GROUP BY pr.id, u.id ORDER BY pr.created_at DESC`, [id]);
-    out.prescriptions = rows;
+      `SELECT pr.id, pr.created_at, pr.notes, pr.items, u.first_name || ' ' || u.last_name AS prescriber
+       FROM prescriptions pr LEFT JOIN users u ON u.id = pr.prescribed_by WHERE pr.patient_id = $1 ORDER BY pr.created_at DESC`, [id]);
+    out.prescriptions = rows.map(presentPrescription);
   }
-  if (can(u, 'lab.view') || can(u, 'patients.view_medical')) {
+  if (can(u, 'lab.view') || canLabResults(u)) {
     const { rows } = await query(
       `SELECT lr.id, lr.number, lr.status, lr.created_at, lr.completed_at, lr.amount, lr.payment_status,
-         coalesce(json_agg(json_build_object('name', t.name, 'result_value', i.result_value, 'result_text', i.result_text,
-           'unit', i.unit, 'reference_range', i.reference_range, 'abnormal', i.abnormal) ORDER BY i.id), '[]') AS items
+         coalesce(json_agg(json_build_object('name', t.name, 'unit', i.unit, 'reference_range', i.reference_range, 'result', i.result) ORDER BY i.id), '[]') AS items
        FROM lab_requests lr JOIN lab_request_items i ON i.request_id = lr.id JOIN lab_exam_types t ON t.id = i.exam_type_id
        WHERE lr.patient_id = $1 GROUP BY lr.id ORDER BY lr.created_at DESC`, [id]);
-    out.lab_requests = rows;
+    const results = canLabResults(u);
+    out.lab_requests = rows.map((r) => ({
+      ...r,
+      items: r.items.map(({ result, ...it }) => {
+        if (!results) return { ...it, results_restricted: true };
+        const x = decJson(result, {});
+        return { ...it, result_value: x.value ?? null, result_text: x.text ?? null, abnormal: x.abnormal ?? null };
+      }),
+    }));
   }
   if (can(u, 'payments.view')) {
     const { rows } = await query(
@@ -112,7 +122,7 @@ router.get('/:id/history', requirePerm('patients.view'), ah(async (req, res) => 
     const { rows } = await query(
       `SELECT a.id, a.scheduled_at, a.reason, a.status, d.first_name || ' ' || d.last_name AS doctor
        FROM appointments a LEFT JOIN users d ON d.id = a.doctor_id WHERE a.patient_id = $1 ORDER BY a.scheduled_at DESC`, [id]);
-    out.appointments = rows;
+    out.appointments = rows.map((r) => ({ ...r, reason: canAppointmentDetails(u) ? decrypt(r.reason) : undefined }));
   }
   res.json(out);
 }));
@@ -132,12 +142,12 @@ router.post('/', requirePerm('patients.create'), ah(async (req, res) => {
     );
     await audit(db, req.ctx, {
       action: 'patient.create', entityType: 'patient', entityId: p.id,
-      summary: `Nouveau patient ${number} — ${data.first_name} ${data.last_name}`,
+      summary: `Nouveau patient ${number}`,
       feed: { kind: 'patient' },
     });
     await notify(db, req.ctx, {
       permission: 'dashboard.view', type: 'patient', icon: '👤',
-      title: 'Nouveau patient', body: `${number} — ${data.first_name} ${data.last_name}`, link: `/patients/${p.id}`,
+      title: 'Nouveau patient', body: number, link: `/patients/${p.id}`,
     });
     req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'patient' });
     return p;

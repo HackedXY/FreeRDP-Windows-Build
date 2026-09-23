@@ -227,8 +227,10 @@ router.post('/sales', requirePerm('pharmacy.sell'), ah(async (req, res) => {
     }
     await audit(db, req.ctx, {
       action: 'pharmacy.sale', entityType: 'pharmacy_sale', entityId: s.id,
-      summary: `Vente médicament ${number} — ${fmtGNF(amount)} (${lines.map((l) => `${l.name} × ${l.quantity}`).join(', ')})`,
-      newValue: { amount, items: lines }, feed: { kind: 'pharmacy', amount },
+      // les médicaments délivrés à un patient sont une information médicale : pas de libellé dans le fil
+      summary: `Vente médicament ${number} — ${fmtGNF(amount)} (${lines.length} article(s))`,
+      newValue: { amount, items: lines.map((l) => ({ product_id: l.product_id, quantity: l.quantity, unit_price: l.unit_price })) },
+      feed: { kind: 'pharmacy', amount },
     });
     let payment = null;
     if (d.payment) {

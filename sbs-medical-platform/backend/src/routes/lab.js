@@ -7,6 +7,8 @@ import { audit, diff } from '../lib/audit.js';
 import { notify, raiseAlert } from '../lib/notify.js';
 import { nextNumber } from '../lib/numbering.js';
 import { fmtGNF, paging, addPeriod } from '../lib/helpers.js';
+import { encrypt, decrypt } from '../lib/crypto.js';
+import { canLabResults, encJson, decJson, patientRef } from '../lib/medical.js';
 
 const router = Router();
 
@@ -67,6 +69,21 @@ router.put('/exams/:id', requirePerm('lab.manage'), ah(async (req, res) => {
 }));
 
 // ------------------------------------------------------------ Demandes
+/** Résultats et renseignements cliniques déchiffrés uniquement pour les rôles habilités. */
+function presentRequest(r, user) {
+  const allowed = canLabResults(user);
+  return {
+    ...r,
+    notes: allowed ? decrypt(r.notes) : undefined,
+    results_restricted: !allowed || undefined,
+    items: r.items.map(({ result, ...it }) => {
+      if (!allowed) return it;
+      const x = decJson(result, {});
+      return { ...it, result_value: x.value ?? null, result_text: x.text ?? null, abnormal: x.abnormal ?? null };
+    }),
+  };
+}
+
 async function getRequest(db, id) {
   const { rows: [r] } = await db.query(
     `SELECT lr.*, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name, p.sex AS patient_sex, p.birth_date AS patient_birth_date,
@@ -104,7 +121,7 @@ router.get('/requests', requirePerm('lab.view', 'lab.request', 'lab.results'), a
 }));
 
 router.get('/requests/:id', requirePerm('lab.view', 'lab.request', 'lab.results'), ah(async (req, res) => {
-  res.json(await getRequest({ query }, Number(req.params.id)));
+  res.json(presentRequest(await getRequest({ query }, Number(req.params.id)), req.user));
 }));
 
 // Médecin → Demande d'examen
@@ -117,7 +134,7 @@ router.post('/requests', requirePerm('lab.request'), ah(async (req, res) => {
     notes: z.string().max(1000).optional().nullable(),
   }), req.body);
   const out = await tx(async (db) => {
-    const { rows: [p] } = await db.query('SELECT id, first_name, last_name FROM patients WHERE id = $1', [d.patient_id]);
+    const { rows: [p] } = await db.query('SELECT id, patient_number FROM patients WHERE id = $1', [d.patient_id]);
     if (!p) throw badRequest('Patient introuvable');
     const { rows: exams } = await db.query('SELECT * FROM lab_exam_types WHERE id = ANY($1::int[]) AND active', [d.exam_type_ids]);
     if (exams.length !== new Set(d.exam_type_ids).size) throw badRequest('Examen inconnu ou inactif.');
@@ -126,21 +143,22 @@ router.post('/requests', requirePerm('lab.request'), ah(async (req, res) => {
     const { rows: [r] } = await db.query(
       `INSERT INTO lab_requests (site_id, number, patient_id, consultation_id, requested_by, priority, notes, amount)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-      [req.user.siteId, number, p.id, d.consultation_id || null, req.user.id, d.priority, d.notes || null, amount]);
+      [req.user.siteId, number, p.id, d.consultation_id || null, req.user.id, d.priority, encrypt(d.notes || null), amount]);
     for (const e of exams) {
       await db.query('INSERT INTO lab_request_items (request_id, exam_type_id, price, unit, reference_range) VALUES ($1,$2,$3,$4,$5)',
         [r.id, e.id, e.price, e.unit, e.reference_range]);
     }
     await audit(db, req.ctx, {
       action: 'lab.request', entityType: 'lab_request', entityId: r.id,
-      summary: `Examen demandé ${number} — ${p.first_name} ${p.last_name} (${exams.map((e) => e.name).join(', ')})`,
+      // ni nom de patient ni intitulé d'examen dans le journal / fil d'activité
+      summary: `Examen demandé ${number} — ${patientRef(p)} (${exams.length} examen(s))`,
       feed: { kind: 'lab' },
     });
     await notify(db, req.ctx, {
       permission: 'lab.results', type: 'lab', icon: '🧪', title: d.priority === 'urgente' ? 'Examen URGENT demandé' : 'Nouvel examen demandé',
-      body: `${p.first_name} ${p.last_name} — ${exams.map((e) => e.name).join(', ')}`, link: `/laboratoire/${r.id}`,
+      body: `${number} — ${exams.length} examen(s)`, link: `/laboratoire/${r.id}`,
     });
-    return getRequest(db, r.id);
+    return presentRequest(await getRequest(db, r.id), req.user);
   });
   res.status(201).json(out);
 }));
@@ -164,17 +182,24 @@ router.put('/requests/:id/results', requirePerm('lab.results'), ah(async (req, r
     if (!r) throw notFound('Demande introuvable');
     if (['annulee'].includes(r.status)) throw badRequest('Demande annulée.');
     const wasCompleted = r.status === 'terminee';
+    let corrected = 0;
     for (const it of d.items) {
       const { rows: [before] } = await db.query('SELECT * FROM lab_request_items WHERE id = $1 AND request_id = $2', [it.id, id]);
       if (!before) throw badRequest(`Ligne d'examen inconnue (#${it.id})`);
+      const prev = decJson(before.result, {});
+      const next = { value: it.result_value ?? null, text: it.result_text ?? null, abnormal: it.abnormal ?? null };
       await db.query(
-        `UPDATE lab_request_items SET result_value = $2, result_text = $3, unit = coalesce($4, unit), reference_range = coalesce($5, reference_range),
-           abnormal = $6, technician_id = $7, result_at = now() WHERE id = $1`,
-        [it.id, it.result_value ?? null, it.result_text ?? null, it.unit ?? null, it.reference_range ?? null, it.abnormal ?? null, req.user.id]);
-      if (wasCompleted) {
-        const ch = diff(before, it, ['result_value', 'result_text', 'abnormal']);
-        if (ch) await audit(db, req.ctx, { action: 'lab.result_correction', entityType: 'lab_request', entityId: id, summary: `Correction de résultat — ${r.number}`, ...ch, feed: false });
-      }
+        `UPDATE lab_request_items SET result = $2, unit = coalesce($3, unit), reference_range = coalesce($4, reference_range),
+           technician_id = $5, result_at = now() WHERE id = $1`,
+        [it.id, encJson(next), it.unit ?? null, it.reference_range ?? null, req.user.id]);
+      if (wasCompleted && JSON.stringify(prev) !== JSON.stringify({ ...{ value: null, text: null, abnormal: null }, ...prev, ...next })) corrected++;
+    }
+    // Correction après validation : tracée, sans recopier les résultats en clair dans le journal
+    if (corrected) {
+      await audit(db, req.ctx, {
+        action: 'lab.result_correction', entityType: 'lab_request', entityId: id, summary: `Correction de résultat — ${r.number}`,
+        oldValue: { results: '[résultat médical]' }, newValue: { results: '[résultat corrigé]', lines: corrected }, feed: false,
+      });
     }
     const status = d.complete ? 'terminee' : 'en_cours';
     await db.query(`UPDATE lab_requests SET status = $2, completed_at = CASE WHEN $2 = 'terminee' THEN coalesce(completed_at, now()) END WHERE id = $1`, [id, status]);
@@ -186,7 +211,7 @@ router.put('/requests/:id/results', requirePerm('lab.results'), ah(async (req, r
         req.ctx.emit(`user:${r.requested_by}`, 'notification', { title: 'Résultats disponibles' });
       }
     }
-    return getRequest(db, id);
+    return presentRequest(await getRequest(db, id), req.user);
   });
   res.json(out);
 }));

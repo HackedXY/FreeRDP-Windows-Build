@@ -52,6 +52,9 @@ export function createApp() {
     next();
   });
 
+  // Réponses API (données médicales/financières) jamais conservées dans le cache du navigateur ou d'un proxy
+  app.use('/api', (_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); next(); });
+
   app.get('/api/health', async (_req, res) => {
     try { await pool.query('SELECT 1'); res.json({ status: 'ok', time: new Date() }); } catch { res.status(503).json({ status: 'db_unavailable' }); }
   });
@@ -103,7 +106,11 @@ export function createApp() {
     else if (err.code === 'LIMIT_FILE_SIZE') { status = 400; message = 'Fichier trop volumineux (8 Mo max).'; }
     else if (err.type === 'entity.parse.failed') { status = 400; message = 'JSON invalide'; }
     if (status >= 500) {
-      console.error(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`, err);
+      // Journal serveur sans données : ni corps de requête, ni paramètres SQL, ni « detail » PostgreSQL
+      // (qui peut contenir des valeurs saisies, donc potentiellement médicales).
+      const where = `${req.method} ${req.originalUrl.split('?')[0]}`;
+      const safe = err.code && /^[0-9A-Z]{5}$/.test(err.code) ? `PostgreSQL ${err.code} ${err.routine || ''}`.trim() : `${err.name}: ${err.message}`;
+      console.error(`[${new Date().toISOString()}] ${where} — ${safe}${config.isProd ? '' : `\n${err.stack?.split('\n').slice(1, 4).join('\n')}`}`);
       message = 'Erreur interne du serveur';
     }
     res.status(status).json({ error: message, code: err.code && typeof err.code === 'string' && !/^\d/.test(err.code) ? err.code : undefined, details: err.details });

@@ -4,6 +4,13 @@ import { query, tx } from '../db/pool.js';
 import { ah, parse, notFound, badRequest } from '../lib/errors.js';
 import { requirePerm } from '../lib/auth.js';
 import { audit, diff } from '../lib/audit.js';
+import { encrypt, decrypt } from '../lib/crypto.js';
+import { canAppointmentDetails } from '../lib/medical.js';
+
+// Motif et notes chiffrés ; visibles seulement par le personnel habilité
+const present = (a, user) => (canAppointmentDetails(user)
+  ? { ...a, reason: decrypt(a.reason), notes: decrypt(a.notes) }
+  : { ...a, reason: undefined, notes: undefined, details_restricted: true });
 
 const router = Router();
 const schema = z.object({
@@ -29,24 +36,25 @@ router.get('/', requirePerm('appointments.view'), ah(async (req, res) => {
   for (const f of ['status']) if (req.query[f]) { vals.push(req.query[f]); where.push(`a.${f} = $${vals.length}`); }
   if (req.query.doctor_id) { vals.push(Number(req.query.doctor_id)); where.push(`a.doctor_id = $${vals.length}`); }
   if (req.query.patient_id) { vals.push(Number(req.query.patient_id)); where.push(`a.patient_id = $${vals.length}`); }
-  if (req.query.q) { vals.push(`%${String(req.query.q).toLowerCase()}%`); where.push(`(lower(p.first_name || ' ' || p.last_name) LIKE $${vals.length} OR lower(coalesce(a.reason,'')) LIKE $${vals.length} OR p.phone LIKE $${vals.length})`); }
+  // le motif étant chiffré, la recherche porte sur le patient (nom, téléphone, n° de dossier)
+  if (req.query.q) { vals.push(`%${String(req.query.q).toLowerCase()}%`); where.push(`(lower(p.first_name || ' ' || p.last_name) LIKE $${vals.length} OR lower(p.patient_number) LIKE $${vals.length} OR p.phone LIKE $${vals.length})`); }
   const { rows } = await query(`${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.scheduled_at LIMIT 1000`, vals);
-  res.json(rows);
+  res.json(rows.map((a) => present(a, req.user)));
 }));
 
 // Rappels : rendez-vous des prochaines 24 h non encore rappelés
-router.get('/reminders', requirePerm('appointments.view'), ah(async (_req, res) => {
+router.get('/reminders', requirePerm('appointments.view'), ah(async (req, res) => {
   const { rows } = await query(
     `${SELECT} WHERE a.status IN ('planifie','confirme') AND a.reminder_sent_at IS NULL
        AND ((a.reminder_at IS NOT NULL AND a.reminder_at <= now()) OR a.scheduled_at <= now() + interval '24 hours')
        AND a.scheduled_at >= now() ORDER BY a.scheduled_at`);
-  res.json(rows);
+  res.json(rows.map((a) => present(a, req.user)));
 }));
 
 router.post('/', requirePerm('appointments.manage'), ah(async (req, res) => {
   const d = parse(schema, req.body);
   const out = await tx(async (db) => {
-    const { rows: [p] } = await db.query('SELECT first_name, last_name FROM patients WHERE id = $1', [d.patient_id]);
+    const { rows: [p] } = await db.query('SELECT patient_number FROM patients WHERE id = $1', [d.patient_id]);
     if (!p) throw badRequest('Patient introuvable');
     if (d.doctor_id) {
       const { rows: clash } = await db.query(
@@ -58,10 +66,10 @@ router.post('/', requirePerm('appointments.manage'), ah(async (req, res) => {
     const { rows: [a] } = await db.query(
       `INSERT INTO appointments (site_id, patient_id, doctor_id, scheduled_at, duration_minutes, reason, notes, reminder_at, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-      [req.user.siteId, d.patient_id, d.doctor_id || null, d.scheduled_at, d.duration_minutes, d.reason || null, d.notes || null, d.reminder_at || null, req.user.id]);
-    await audit(db, req.ctx, { action: 'appointment.create', entityType: 'appointment', entityId: a.id, summary: `Rendez-vous — ${p.first_name} ${p.last_name} le ${new Date(d.scheduled_at).toLocaleString('fr-FR')}`, feed: false });
+      [req.user.siteId, d.patient_id, d.doctor_id || null, d.scheduled_at, d.duration_minutes, encrypt(d.reason || null), encrypt(d.notes || null), d.reminder_at || null, req.user.id]);
+    await audit(db, req.ctx, { action: 'appointment.create', entityType: 'appointment', entityId: a.id, summary: `Rendez-vous — ${p.patient_number} le ${new Date(d.scheduled_at).toLocaleString('fr-FR')}`, feed: false });
     const { rows: [full] } = await db.query(`${SELECT} WHERE a.id = $1`, [a.id]);
-    return full;
+    return present(full, req.user);
   });
   res.status(201).json(out);
 }));
@@ -73,16 +81,16 @@ router.put('/:id', requirePerm('appointments.manage'), ah(async (req, res) => {
     const { rows: [before] } = await db.query('SELECT * FROM appointments WHERE id = $1 FOR UPDATE', [id]);
     if (!before) throw notFound('Rendez-vous introuvable');
     const sets = []; const vals = [];
-    for (const f of FIELDS) if (d[f] !== undefined) { vals.push(d[f]); sets.push(`${f} = $${vals.length}`); }
+    for (const f of FIELDS) if (d[f] !== undefined) { vals.push(['reason', 'notes'].includes(f) ? encrypt(d[f] || null) : d[f]); sets.push(`${f} = $${vals.length}`); }
     if (d.scheduled_at) sets.push('reminder_sent_at = NULL');
     if (sets.length) {
       vals.push(id);
       await db.query(`UPDATE appointments SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals);
-      const ch = diff(before, d, FIELDS);
+      const ch = diff(before, d, FIELDS.filter((f) => !['reason', 'notes'].includes(f)));
       if (ch) await audit(db, req.ctx, { action: 'appointment.update', entityType: 'appointment', entityId: id, summary: 'Modification d\'un rendez-vous', ...ch, feed: false });
     }
     const { rows: [full] } = await db.query(`${SELECT} WHERE a.id = $1`, [id]);
-    return full;
+    return present(full, req.user);
   });
   res.json(out);
 }));

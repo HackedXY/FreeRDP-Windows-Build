@@ -8,9 +8,10 @@ import { notify } from '../lib/notify.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { nextNumber } from '../lib/numbering.js';
 import { paging, addPeriod, fmtGNF, refreshPaymentStatus } from '../lib/helpers.js';
+import { canClinical, canPrescriptions, canLabResults, encJson, decJson, VITALS as VITAL_FIELDS, patientRef } from '../lib/medical.js';
 
 const router = Router();
-const VITALS = ['weight_kg', 'temperature_c', 'bp_systolic', 'bp_diastolic', 'heart_rate', 'spo2'];
+const VITALS = VITAL_FIELDS;
 const CLINICAL = ['observations', 'diagnosis', 'treatment'];
 const STATUS_LABEL = { en_attente: 'En attente', en_cours: 'En cours', terminee: 'Terminée', annulee: 'Annulée' };
 
@@ -29,12 +30,28 @@ const baseSchema = z.object({
   acts: z.array(z.object({ act_id: z.coerce.number().int().positive(), quantity: z.coerce.number().int().min(1).default(1) })).optional(),
 });
 
+/**
+ * Données renvoyées selon la fonction :
+ *  - observations / diagnostic / traitement : dossier médical ou diagnostic ;
+ *  - motif et constantes : personnel soignant (médecin, infirmier) ;
+ *  - rien de clinique pour les autres rôles.
+ */
 function present(c, user) {
-  const out = { ...c };
+  const { vitals, ...out } = c;
   const medical = can(user, 'patients.view_medical') || can(user, 'consultations.diagnose');
   for (const f of CLINICAL) out[f] = medical ? decrypt(c[f]) : undefined;
+  if (canClinical(user)) {
+    out.reason = decrypt(c.reason);
+    Object.assign(out, Object.fromEntries(VITALS.map((k) => [k, null])), decJson(vitals, {}));
+  } else {
+    out.reason = undefined;
+  }
   if (!medical) out.clinical_restricted = true;
   return out;
+}
+
+export function presentPrescription(pr) {
+  return { ...pr, notes: decrypt(pr.notes), items: decJson(pr.items, []).map((it, i) => ({ id: i + 1, ...it })) };
 }
 
 async function recomputeAmount(db, id) {
@@ -67,14 +84,11 @@ async function getFull(db, id, user) {
      WHERE ca.consultation_id = $1 ORDER BY ca.id`, [id]);
   const out = present(c, user);
   out.acts = acts;
-  if (can(user, 'patients.view_medical') || can(user, 'prescriptions.create')) {
-    const { rows } = await db.query(
-      `SELECT pr.*, coalesce(json_agg(pi.* ORDER BY pi.id) FILTER (WHERE pi.id IS NOT NULL), '[]') AS items
-       FROM prescriptions pr LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id
-       WHERE pr.consultation_id = $1 GROUP BY pr.id ORDER BY pr.id`, [id]);
-    out.prescriptions = rows;
+  if (canPrescriptions(user)) {
+    const { rows } = await db.query('SELECT * FROM prescriptions WHERE consultation_id = $1 ORDER BY id', [id]);
+    out.prescriptions = rows.map(presentPrescription);
   }
-  if (can(user, 'lab.view') || can(user, 'lab.request')) {
+  if (canLabResults(user)) {
     const { rows } = await db.query(
       `SELECT lr.id, lr.number, lr.status, lr.amount, lr.payment_status, string_agg(t.name, ', ' ORDER BY t.name) AS exams
        FROM lab_requests lr JOIN lab_request_items i ON i.request_id = lr.id JOIN lab_exam_types t ON t.id = i.exam_type_id
@@ -110,7 +124,8 @@ router.get('/', requirePerm('consultations.view'), ah(async (req, res) => {
      FROM consultations c JOIN patients p ON p.id = c.patient_id LEFT JOIN users d ON d.id = c.doctor_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY c.consulted_at DESC LIMIT $${vals.length - 1} OFFSET $${vals.length}`, vals);
-  res.json({ items: rows.map(({ total, ...r }) => r), total: rows[0]?.total || 0 });
+  const clinical = canClinical(req.user);
+  res.json({ items: rows.map(({ total, ...r }) => ({ ...r, reason: clinical ? decrypt(r.reason) : undefined })), total: rows[0]?.total || 0 });
 }));
 
 router.get('/:id', requirePerm('consultations.view'), ah(async (req, res) => {
@@ -124,18 +139,20 @@ router.post('/', requirePerm('consultations.create'), ah(async (req, res) => {
   const out = await tx(async (db) => {
     const { rows: [p] } = await db.query('SELECT id, patient_number, first_name, last_name FROM patients WHERE id = $1 AND archived_at IS NULL', [d.patient_id]);
     if (!p) throw badRequest('Patient introuvable');
+    if (d.reason && !canClinical(req.user)) throw forbidden('Saisie du motif réservée au personnel soignant.');
     const doctorId = d.doctor_id ?? (req.user.roleCode === 'medecin' ? req.user.id : null);
     const number = await nextNumber(db, 'consultation', 'CONS');
     const { rows: [c] } = await db.query(
-      `INSERT INTO consultations (site_id, number, patient_id, doctor_id, consulted_at, reason, ${VITALS.join(', ')},
+      `INSERT INTO consultations (site_id, number, patient_id, doctor_id, consulted_at, reason, vitals,
          observations, diagnosis, treatment, status, created_by)
-       VALUES ($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
-      [req.user.siteId, number, p.id, doctorId, d.consulted_at || null, d.reason || null, ...VITALS.map((f) => d[f] ?? null),
+       VALUES ($1,$2,$3,$4,coalesce($5::timestamptz, now()),$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+      [req.user.siteId, number, p.id, doctorId, d.consulted_at || null, encrypt(d.reason || null),
+        VITALS.some((f) => d[f] != null) ? encJson(Object.fromEntries(VITALS.map((f) => [f, d[f] ?? null]))) : null,
         ...CLINICAL.map((f) => encrypt(d[f] || null)), d.status || 'en_attente', req.user.id]);
     if (d.acts?.length) await addActs(db, req, c.id, d.acts);
     await audit(db, req.ctx, {
       action: 'consultation.create', entityType: 'consultation', entityId: c.id,
-      summary: `Consultation ${number} — ${p.first_name} ${p.last_name}`, feed: { kind: 'consultation' },
+      summary: `Consultation ${number} — ${patientRef(p)}`, feed: { kind: 'consultation' },
     });
     req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
     return getFull(db, c.id, req.user);
@@ -152,12 +169,21 @@ router.put('/:id', requirePerm('consultations.update', 'consultations.vitals', '
     if (before.status === 'annulee') throw badRequest('Consultation annulée : modification impossible.');
     const sets = []; const vals = [];
     const set = (f, v) => { vals.push(v); sets.push(`${f} = $${vals.length}`); };
-    const general = ['doctor_id', 'consulted_at', 'reason', 'status'];
-    if (general.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.update')) throw forbidden('Modification de la consultation non autorisée.');
+    const general = ['doctor_id', 'consulted_at', 'status'];
+    if ([...general, 'reason'].some((f) => d[f] !== undefined) && !can(req.user, 'consultations.update')) throw forbidden('Modification de la consultation non autorisée.');
     if (VITALS.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.vitals')) throw forbidden('Saisie des constantes non autorisée.');
     if (CLINICAL.some((f) => d[f] !== undefined) && !can(req.user, 'consultations.diagnose')) throw forbidden('Saisie du diagnostic non autorisée.');
-    for (const f of [...general, ...VITALS]) if (d[f] !== undefined) set(f, d[f]);
+    for (const f of general) if (d[f] !== undefined) set(f, d[f]);
     const clinicalChanged = [];
+    if (d.reason !== undefined && (decrypt(before.reason) || null) !== (d.reason || null)) { set('reason', encrypt(d.reason || null)); clinicalChanged.push('reason'); }
+    if (VITALS.some((f) => d[f] !== undefined)) {
+      const cur = decJson(before.vitals, {});
+      const next = { ...Object.fromEntries(VITALS.map((k) => [k, cur[k] ?? null])) };
+      for (const f of VITALS) if (d[f] !== undefined) next[f] = d[f] === null || d[f] === '' ? null : Number(d[f]);
+      if (JSON.stringify(next) !== JSON.stringify({ ...Object.fromEntries(VITALS.map((k) => [k, cur[k] ?? null])) })) {
+        set('vitals', encJson(next)); clinicalChanged.push('vitals');
+      }
+    }
     for (const f of CLINICAL) {
       if (d[f] === undefined || (decrypt(before[f]) || null) === (d[f] || null)) continue;
       set(f, encrypt(d[f] || null)); clinicalChanged.push(f);
@@ -165,13 +191,13 @@ router.put('/:id', requirePerm('consultations.update', 'consultations.vitals', '
     if (!sets.length) return getFull(db, id, req.user);
     vals.push(id);
     await db.query(`UPDATE consultations SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals);
-    const changes = diff(before, d, [...general, ...VITALS]);
+    const changes = diff(before, d, general);
     const statusChanged = d.status && d.status !== before.status;
-    const { rows: [p] } = await db.query('SELECT first_name, last_name FROM patients WHERE id = $1', [before.patient_id]);
+    const { rows: [p] } = await db.query('SELECT id, patient_number FROM patients WHERE id = $1', [before.patient_id]);
     await audit(db, req.ctx, {
       action: statusChanged ? 'consultation.status' : 'consultation.update', entityType: 'consultation', entityId: id,
       summary: statusChanged
-        ? `Consultation ${STATUS_LABEL[d.status].toLowerCase()} — ${p.first_name} ${p.last_name} (${before.number})`
+        ? `Consultation ${STATUS_LABEL[d.status].toLowerCase()} — ${patientRef(p)} (${before.number})`
         : `Mise à jour de la consultation ${before.number}`,
       oldValue: { ...(changes?.oldValue || {}), ...Object.fromEntries(clinicalChanged.map((f) => [f, '[donnée médicale]'])) },
       newValue: { ...(changes?.newValue || {}), ...Object.fromEntries(clinicalChanged.map((f) => [f, '[modifiée]'])) },
@@ -182,7 +208,7 @@ router.put('/:id', requirePerm('consultations.update', 'consultations.vitals', '
       if (c.amount > 0 && c.payment_status !== 'payee') {
         await notify(db, req.ctx, {
           permission: 'payments.create', type: 'to_pay', icon: '💳', title: 'Consultation à encaisser',
-          body: `${p.first_name} ${p.last_name} — ${fmtGNF(c.amount)}`, link: `/paiements/nouveau?source=consultation&id=${id}`,
+          body: `${before.number} — ${patientRef(p)} — ${fmtGNF(c.amount)}`, link: `/paiements/nouveau?source=consultation&id=${id}`,
         });
       }
       req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
@@ -268,15 +294,13 @@ router.post('/:id/prescriptions', requirePerm('prescriptions.create'), ah(async 
     const { rows: [c] } = await db.query('SELECT id, number, patient_id, status FROM consultations WHERE id = $1', [id]);
     if (!c) throw notFound('Consultation introuvable');
     if (c.status === 'annulee') throw badRequest('Consultation annulée.');
+    const items = d.items.map((it) => ({
+      product_id: it.product_id || null, drug_name: it.drug_name, dosage: it.dosage || null, frequency: it.frequency || null,
+      duration: it.duration || null, quantity: it.quantity ?? null, instructions: it.instructions || null,
+    }));
     const { rows: [pr] } = await db.query(
-      'INSERT INTO prescriptions (consultation_id, patient_id, prescribed_by, notes) VALUES ($1,$2,$3,$4) RETURNING *',
-      [id, c.patient_id, req.user.id, d.notes || null]);
-    for (const it of d.items) {
-      await db.query(
-        `INSERT INTO prescription_items (prescription_id, product_id, drug_name, dosage, frequency, duration, quantity, instructions)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [pr.id, it.product_id || null, it.drug_name, it.dosage || null, it.frequency || null, it.duration || null, it.quantity ?? null, it.instructions || null]);
-    }
+      'INSERT INTO prescriptions (consultation_id, patient_id, prescribed_by, notes, items) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [id, c.patient_id, req.user.id, encrypt(d.notes || null), encJson(items)]);
     await audit(db, req.ctx, {
       action: 'prescription.create', entityType: 'prescription', entityId: pr.id,
       summary: `Prescription (${d.items.length} ligne(s)) — consultation ${c.number}`, feed: false,
@@ -286,17 +310,15 @@ router.post('/:id/prescriptions', requirePerm('prescriptions.create'), ah(async 
   res.status(201).json(out);
 }));
 
-// Prescription pour la pharmacie (sans données cliniques)
+// Prescription pour la pharmacie (sans données cliniques de la consultation)
 router.get('/prescriptions/:pid', requirePerm('pharmacy.sell', 'prescriptions.create', 'patients.view_medical'), ah(async (req, res) => {
   const { rows: [pr] } = await query(
-    `SELECT pr.id, pr.patient_id, pr.created_at, pr.notes, p.first_name || ' ' || p.last_name AS patient_name, p.patient_number,
-       u.first_name || ' ' || u.last_name AS prescriber,
-       coalesce(json_agg(pi.* ORDER BY pi.id) FILTER (WHERE pi.id IS NOT NULL), '[]') AS items
-     FROM prescriptions pr JOIN patients p ON p.id = pr.patient_id LEFT JOIN users u ON u.id = pr.prescribed_by
-     LEFT JOIN prescription_items pi ON pi.prescription_id = pr.id WHERE pr.id = $1 GROUP BY pr.id, p.id, u.id`,
+    `SELECT pr.id, pr.patient_id, pr.created_at, pr.notes, pr.items, p.first_name || ' ' || p.last_name AS patient_name, p.patient_number,
+       u.first_name || ' ' || u.last_name AS prescriber
+     FROM prescriptions pr JOIN patients p ON p.id = pr.patient_id LEFT JOIN users u ON u.id = pr.prescribed_by WHERE pr.id = $1`,
     [Number(req.params.pid)]);
   if (!pr) throw notFound('Prescription introuvable');
-  res.json(pr);
+  res.json(presentPrescription(pr));
 }));
 
 export default router;
