@@ -299,3 +299,4 @@ test('journal d\'audit : intégrité vérifiée (chaîne + signatures)', async (
   // Les autres tentatives de falsification sont couvertes par audit-integrity.test.js
   await assert.rejects(pool.query('DELETE FROM payments'), /permission denied|interdite/);
 });
+

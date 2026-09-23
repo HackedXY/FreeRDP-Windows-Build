@@ -1,7 +1,15 @@
 # Déploiement de production : docker compose up -d
 # Prérequis : fichier .env (voir .env.example) et un nom de domaine pointant vers le serveur.
+# Journaux Docker bornés (évite de remplir le disque)
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
+    logging: *logging
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -22,6 +30,7 @@ services:
   # Migrations + initialisation : seul service à détenir les identifiants propriétaire.
   # S'exécute puis s'arrête (docker compose run --rm migrate pour une mise à jour).
   migrate:
+    logging: *logging
     build: .
     restart: "no"
     depends_on:
@@ -36,6 +45,7 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
 
   app:
+    logging: *logging
     build: .
     restart: unless-stopped
     depends_on:
@@ -52,20 +62,24 @@ services:
 
   # Reverse proxy HTTPS (certificat Let's Encrypt automatique)
   caddy:
+    logging: *logging
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on: [app]
     ports: ["80:80", "443:443"]
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN requis}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL requis}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
+      - caddy_config:/config
 
   # Sauvegarde quotidienne HORS SERVEUR : dump chiffré avec la clé PUBLIQUE (le serveur ne peut
   # pas relire les sauvegardes), envoi via rclone (S3/Backblaze/SFTP…), rétention, journal dans
   # backup_runs. L'application alerte (haute) en cas d'échec ou d'absence de sauvegarde > 26 h.
   backup:
+    logging: *logging
     build: .
     restart: unless-stopped
     depends_on:
@@ -91,3 +105,4 @@ volumes:
   pgdata:
   uploads:
   caddy_data:
+  caddy_config:

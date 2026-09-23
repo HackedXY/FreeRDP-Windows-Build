@@ -78,7 +78,10 @@ export async function seed({ log = console.log } = {}) {
         [username, hash]);
       log('──────────────────────────────────────────────────────────');
       log(` Compte administrateur créé : ${username}`);
-      log(` Mot de passe temporaire   : ${password}`);
+      // Le mot de passe n'est affiché que s'il a été généré ici : fourni par ADMIN_PASSWORD
+      // (fichier .env), il ne doit jamais se retrouver dans les journaux des conteneurs.
+      if (process.env.ADMIN_PASSWORD) log(' Mot de passe temporaire   : celui défini par ADMIN_PASSWORD (non affiché)');
+      else log(` Mot de passe temporaire   : ${password}`);
       log(' (changement obligatoire à la première connexion)');
       log('──────────────────────────────────────────────────────────');
     }

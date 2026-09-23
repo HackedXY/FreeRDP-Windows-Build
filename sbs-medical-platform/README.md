@@ -35,6 +35,8 @@ Tests d'intégration (base `sbs_test` requise) : `cd backend && npm test`.
 
 ## Mise en production
 
+➡️ **Procédure complète pas à pas (VPS, DNS, HTTPS, secrets, sauvegardes, vérifications) : [docs/DEPLOIEMENT.md](docs/DEPLOIEMENT.md).** Résumé :
+
 ```bash
 cp .env.example .env        # remplir DOMAIN, les 4 mots de passe PostgreSQL, DATA_ENCRYPTION_KEY et AUDIT_HMAC_KEY
                             # (openssl rand -base64 32), BACKUP_TARGET ; préparer secrets/ (voir « Sauvegardes »)
