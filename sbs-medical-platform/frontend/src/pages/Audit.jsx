@@ -30,11 +30,11 @@ export default function Audit() {
   };
   return (
     <>
-      <PageHeader title="Journal d'audit" subtitle="Trace immuable et chaînée de toutes les opérations sensibles">
+      <PageHeader title="Journal d'audit" subtitle="Journal en ajout seul pour l'application, chaîné et signé : toute altération est détectée par la vérification">
         <button className="btn ghost" onClick={exportCsv}>⬇ Export CSV</button>
         <button className="btn" onClick={check}>🔏 Vérifier l'intégrité</button>
       </PageHeader>
-      {verify && <div className={`alert-box ${verify.ok ? 'ok' : 'danger'}`}>{verify.ok ? `✔ Chaîne de hachage intègre — ${verify.entries} entrées vérifiées le ${dateTime(verify.checked_at)}.` : `✖ Rupture de la chaîne détectée aux entrées : ${verify.broken_ids.join(', ')}. Le journal a peut-être été altéré directement en base.`}</div>}
+      {verify && <div className={`alert-box ${verify.ok ? 'ok' : 'danger'}`}>{verify.ok ? `✔ Journal intègre (chaîne et signatures) — ${verify.entries} entrées vérifiées le ${dateTime(verify.checked_at)}.` : `✖ Altération détectée — chaîne rompue : ${verify.chain_broken_ids.join(', ') || 'aucune'} ; signature invalide : ${verify.signature_invalid_ids.join(', ') || 'aucune'} ; signature absente : ${verify.signature_missing_ids.join(', ') || 'aucune'}.`}</div>}
       <Card>
         <div className="toolbar">
           <input type="search" placeholder="Rechercher dans les résumés et motifs…" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} />

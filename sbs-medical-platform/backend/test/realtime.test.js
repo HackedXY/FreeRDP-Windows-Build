@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { io as ioc } from 'socket.io-client';
-import { resetDb, adminAgent, employee, pool, app } from './helpers.js';
+import { resetDb, adminAgent, employee, pool, app, closePools } from './helpers.js';
 const { attachRealtime } = await import('../src/server.js');
 
 let server, url, admin, cashier;
@@ -16,7 +16,7 @@ before(async () => {
   cashier = await employee(admin, 'caissier', 'caissier_rt');
   server.io = io;
 });
-after(async () => { server.io.close(); server.close(); await pool.end(); });
+after(async () => { server.io.close(); server.close(); await closePools(); });
 
 const cookieOf = (agent) => agent.loginRes.headers['set-cookie'][0].split(';')[0];
 function connect(agent) {

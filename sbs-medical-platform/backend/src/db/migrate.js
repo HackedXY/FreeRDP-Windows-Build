@@ -9,14 +9,19 @@ export async function migrate({ log = console.log } = {}) {
   await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   const done = new Set((await pool.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  const files = fs.readdirSync(dir).filter((f) => /\.(sql|js)$/.test(f)).sort();
   for (const file of files) {
     if (done.has(file)) continue;
-    const sql = fs.readFileSync(path.join(dir, file), 'utf8');
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(sql);
+      if (file.endsWith('.sql')) {
+        await client.query(fs.readFileSync(path.join(dir, file), 'utf8'));
+      } else {
+        // Migration de données (ex. chiffrement / signature) : nécessite les clés d'environnement
+        const mod = await import(path.join(dir, file));
+        await mod.up(client);
+      }
       await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
       await client.query('COMMIT');
       log(`✔ migration appliquée : ${file}`);
@@ -27,6 +32,9 @@ export async function migrate({ log = console.log } = {}) {
       client.release();
     }
   }
+  // Droits applicatifs recalculés à chaque exécution (nouvelles tables comprises)
+  const { rows: [fn] } = await pool.query(`SELECT to_regproc('sbs_apply_grants') AS f`);
+  if (fn.f) await pool.query('SELECT sbs_apply_grants()');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

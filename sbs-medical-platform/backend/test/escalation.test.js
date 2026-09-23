@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { resetDb, adminAgent, employee, login, pool } from './helpers.js';
+import { resetDb, adminAgent, employee, login, pool, closePools } from './helpers.js';
 
 let admin, hr, rolesMgr, cashier, owner;
 let roles = [];
@@ -18,7 +18,7 @@ before(async () => {
   rolesMgr = await employee(admin, 'gestion_roles', 'roles01');
   cashier = await employee(admin, 'caissier', 'caissier01');
 });
-after(async () => { await pool.end(); });
+after(async () => { await closePools(); });
 
 async function overridesOf(userId) {
   const { rows } = await pool.query('SELECT permission_code, granted FROM user_permissions WHERE user_id = $1', [userId]);

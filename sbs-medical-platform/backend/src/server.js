@@ -9,7 +9,23 @@ import { setIo, makeContext } from './lib/realtime.js';
 import { userFromToken, SESSION_COOKIE } from './lib/auth.js';
 import { connected, disconnected } from './lib/presence.js';
 import { checkExpiries } from './lib/stock.js';
-import { tx } from './db/pool.js';
+import { tx, pool } from './db/pool.js';
+
+/**
+ * Refuse de démarrer si l'application est connectée avec le rôle propriétaire du
+ * schéma ou un superutilisateur : ces droits permettraient de réécrire l'audit.
+ */
+async function assertLeastPrivilege() {
+  const { rows: [r] } = await pool.query(
+    `SELECT r.rolsuper AS superuser,
+       pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_log'), 'MEMBER') AS owner
+     FROM pg_roles r WHERE r.rolname = current_user`);
+  if (r.superuser || r.owner) {
+    const msg = 'La connexion applicative (DATABASE_URL) dispose des droits propriétaire/superutilisateur : utilisez le rôle restreint sbs_app.';
+    if (config.isProd) throw new Error(msg);
+    console.warn(`⚠️  ${msg} (toléré hors production)`);
+  }
+}
 
 export function attachRealtime(server) {
   const io = new Server(server, { path: '/socket.io', serveClient: false, cors: config.corsOrigin ? { origin: config.corsOrigin, credentials: true } : undefined });
@@ -42,8 +58,10 @@ async function runPeriodicChecks() {
 }
 
 async function main() {
-  await migrate();
-  await seed();
+  // Les migrations ne s'exécutent que si les identifiants propriétaire sont fournis
+  // (service « migrate » en production ; jamais dans le conteneur applicatif).
+  if (config.migrationDatabaseUrl) { await migrate(); await seed(); }
+  await assertLeastPrivilege();
   const app = createApp();
   const server = http.createServer(app);
   attachRealtime(server);

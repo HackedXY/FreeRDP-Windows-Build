@@ -1,8 +1,10 @@
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://sbs:sbs@localhost:5432/sbs_test';
+// L'application tourne avec le rôle restreint ; le rôle propriétaire ne sert qu'aux migrations
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://sbs_app:sbs_app@localhost:5432/sbs_test';
+process.env.MIGRATION_DATABASE_URL = process.env.TEST_MIGRATION_DATABASE_URL || 'postgres://sbs:sbs@localhost:5432/sbs_test';
 process.env.ADMIN_PASSWORD = 'AdminTest2026';
 
-const { pool } = await import('../src/db/pool.js');
+const { pool, ownerPool } = await import('../src/db/pool.js');
 const { migrate } = await import('../src/db/migrate.js');
 const { seed } = await import('../src/db/seed.js');
 const { createApp } = await import('../src/app.js');
@@ -10,7 +12,7 @@ const { invalidateSettings } = await import('../src/lib/settings.js');
 const supertest = (await import('supertest')).default;
 
 export async function resetDb() {
-  await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+  await ownerPool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
   invalidateSettings();
   await migrate({ log: () => {} });
   await seed({ log: () => {} });
@@ -56,4 +58,9 @@ export async function employee(admin, roleCode, username) {
   return b;
 }
 
-export { pool };
+export { pool, ownerPool };
+
+export async function closePools() {
+  await pool.end();
+  if (ownerPool !== pool) await ownerPool.end();
+}

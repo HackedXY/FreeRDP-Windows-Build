@@ -1,6 +1,8 @@
 // Journal d'audit : chaque opération sensible laisse une trace immuable
 // (utilisateur, date/heure, action, élément, ancienne/nouvelle valeur, motif).
-// La table est en ajout seul et chaînée par hachage (voir migration).
+// Protection : le rôle applicatif ne peut qu'ajouter (INSERT/SELECT), chaque entrée
+// est chaînée par hachage (trigger) et signée par HMAC avec une clé hors base.
+import { signAuditHash, auditKeyId } from './auditsig.js';
 
 const ACTION_LABELS = {
   'auth.login': 'Connexion',
@@ -27,7 +29,7 @@ export async function audit(db, ctx, {
     `INSERT INTO audit_log (user_id, username, action, entity_type, entity_id, summary,
        old_value, new_value, reason, ip, user_agent)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     RETURNING id, created_at`,
+     RETURNING id, created_at, hash`,
     [
       user?.id ?? null, username ?? user?.username ?? null, action, entityType,
       entityId === null ? null : String(entityId), summary,
@@ -36,6 +38,8 @@ export async function audit(db, ctx, {
       reason, ctx?.ip ?? null, ctx?.userAgent ?? null,
     ],
   );
+  await db.query('INSERT INTO audit_signatures (audit_id, key_id, sig) VALUES ($1,$2,$3)',
+    [rows[0].id, auditKeyId(), signAuditHash(rows[0].id, rows[0].hash)]);
   if (ctx && !NOT_IN_FEED.has(action) && feed !== false) {
     ctx.emit('perm:dashboard.view', 'activity', {
       id: rows[0].id,

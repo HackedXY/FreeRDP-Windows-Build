@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { resetDb, adminAgent, employee, login, pool, app } from './helpers.js';
+import { resetDb, adminAgent, employee, login, pool, app, closePools } from './helpers.js';
 import supertest from 'supertest';
 
 let admin, doctor, cashier, pharmacist, nurse, labtech;
@@ -15,7 +15,7 @@ before(async () => {
   nurse = await employee(admin, 'infirmier', 'infirmier01');
   labtech = await employee(admin, 'laborantin', 'labo01');
 });
-after(async () => { await pool.end(); });
+after(async () => { await closePools(); });
 
 test('authentification : refus sans session et en-tête CSRF exigé', async () => {
   const r = await supertest(app).get('/api/patients');
@@ -292,19 +292,10 @@ test('tableau de bord, rapports, rapport employé, recherche', async () => {
   assert.equal(s2.body.payments, undefined);
 });
 
-test('journal d\'audit : ajout seul et chaîne de hachage intègre', async () => {
+test('journal d\'audit : intégrité vérifiée (chaîne + signatures)', async () => {
   const v = await admin.get('/api/audit/verify');
   assert.equal(v.body.ok, true);
   assert.ok(v.body.entries > 20);
-  const { rows: [{ id }] } = await pool.query('SELECT min(id) + 2 AS id FROM audit_log');
-  await assert.rejects(pool.query('UPDATE audit_log SET summary = $1 WHERE id = $2', ['falsifié', id]), /ajout seul/);
-  await assert.rejects(pool.query('DELETE FROM audit_log WHERE id = $1', [id]), /ajout seul/);
-  await assert.rejects(pool.query('DELETE FROM payments'), /interdite/);
-  // Falsification contournant les triggers : détectée par la vérification
-  await pool.query('ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update');
-  await pool.query(`UPDATE audit_log SET summary = 'falsifié' WHERE id = $1`, [id]);
-  await pool.query('ALTER TABLE audit_log ENABLE TRIGGER audit_log_no_update');
-  const v2 = await admin.get('/api/audit/verify');
-  assert.equal(v2.body.ok, false);
-  assert.deepEqual(v2.body.broken_ids, [Number(id)]);
+  // Les autres tentatives de falsification sont couvertes par audit-integrity.test.js
+  await assert.rejects(pool.query('DELETE FROM payments'), /permission denied|interdite/);
 });

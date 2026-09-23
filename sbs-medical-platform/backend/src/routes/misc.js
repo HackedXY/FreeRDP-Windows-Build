@@ -10,6 +10,7 @@ import { raiseAlert } from '../lib/notify.js';
 import { getSettings, invalidateSettings } from '../lib/settings.js';
 import { paging, addPeriod } from '../lib/helpers.js';
 import { DEFAULT_SETTINGS } from '../lib/permissions.js';
+import { auditKeyId, verifyAuditSig } from '../lib/auditsig.js';
 
 export const search = Router();
 export const alerts = Router();
@@ -108,15 +109,35 @@ auditRoutes.get('/actions', requirePerm('audit.view'), ah(async (_req, res) => {
   res.json(rows.map((r) => r.action));
 }));
 
-/** Vérifie l'intégrité de la chaîne de hachage du journal. */
+/**
+ * Vérifie l'intégrité du journal :
+ *  - chaîne de hachage (chaque entrée référence la précédente, contenu inchangé) ;
+ *  - signature HMAC de chaque entrée (clé hors base) : détecte aussi une
+ *    réécriture complète de la chaîne par un accès direct à la base.
+ */
 auditRoutes.get('/verify', requirePerm('audit.view'), ah(async (_req, res) => {
   const { rows } = await query(
-    `SELECT id FROM (
-       SELECT a.id, a.hash, a.prev_hash, audit_row_hash(a) AS computed, lag(a.hash) OVER (ORDER BY a.id) AS lag_hash FROM audit_log a
-     ) x WHERE x.hash IS DISTINCT FROM x.computed OR coalesce(x.prev_hash, '') <> coalesce(x.lag_hash, '')
-     ORDER BY id LIMIT 20`);
-  const { rows: [c] } = await query('SELECT count(*)::int AS n FROM audit_log');
-  res.json({ ok: rows.length === 0, entries: c.n, broken_ids: rows.map((r) => r.id), checked_at: new Date() });
+    `SELECT a.id, a.hash, a.prev_hash, audit_row_hash(a) AS computed, lag(a.hash) OVER (ORDER BY a.id) AS lag_hash,
+       s.sig, s.key_id
+     FROM audit_log a LEFT JOIN audit_signatures s ON s.audit_id = a.id ORDER BY a.id`);
+  const chainBroken = []; const sigInvalid = []; const sigMissing = [];
+  const keyId = auditKeyId();
+  for (const r of rows) {
+    if (r.hash !== r.computed || (r.prev_hash || '') !== (r.lag_hash || '')) chainBroken.push(Number(r.id));
+    if (!r.sig) sigMissing.push(Number(r.id));
+    else if (r.key_id !== keyId || !verifyAuditSig(r.id, r.hash, r.sig)) sigInvalid.push(Number(r.id));
+  }
+  const last = rows[rows.length - 1];
+  res.json({
+    ok: !chainBroken.length && !sigInvalid.length && !sigMissing.length,
+    entries: rows.length,
+    chain_broken_ids: chainBroken.slice(0, 20),
+    signature_invalid_ids: sigInvalid.slice(0, 20),
+    signature_missing_ids: sigMissing.slice(0, 20),
+    broken_ids: [...new Set([...chainBroken, ...sigInvalid, ...sigMissing])].sort((a, b) => a - b).slice(0, 20),
+    head: last ? { id: Number(last.id), hash: last.hash } : null,
+    checked_at: new Date(),
+  });
 }));
 
 // ----------------------------------------------------------------- Notifications
