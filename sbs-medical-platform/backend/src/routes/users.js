@@ -9,7 +9,7 @@ import { raiseAlert } from '../lib/notify.js';
 import { temporaryPassword } from '../lib/crypto.js';
 import { nextNumber } from '../lib/numbering.js';
 import { PERMISSION_CODES } from '../lib/permissions.js';
-import { disconnectUser } from '../lib/realtime.js';
+import { disconnectUser, refreshRealtime } from '../lib/realtime.js';
 import { checkPasswordPolicy, BCRYPT_ROUNDS } from './auth.js';
 import { setActor, roleInfo, isPrivilegedRole, targetProfile, denyEscalation } from '../lib/privilege.js';
 
@@ -193,6 +193,7 @@ router.put('/:id', requirePerm('users.manage'), ah(async (req, res) => {
     return getUser(db, id);
   });
   if (user.status === 'disabled') disconnectUser(id);
+  else await refreshRealtime({ userIds: [id] }); // droits réévalués avant la réponse
   res.json(user);
 }));
 

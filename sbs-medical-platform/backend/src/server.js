@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { createApp } from './app.js';
 import { migrate } from './db/migrate.js';
 import { seed } from './db/seed.js';
-import { setIo, makeContext } from './lib/realtime.js';
+import { setIo, makeContext, startRealtimeSweep } from './lib/realtime.js';
 import { userFromToken, SESSION_COOKIE } from './lib/auth.js';
 import { connected, disconnected } from './lib/presence.js';
 import { checkExpiries } from './lib/stock.js';
@@ -28,26 +28,40 @@ async function assertLeastPrivilege() {
   }
 }
 
+/** Origine autorisée pour la poignée de main WebSocket (protection contre le détournement inter-sites). */
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // clients non navigateurs : l'authentification par session reste exigée
+  try {
+    const o = new URL(origin);
+    if (config.corsOrigin && origin === config.corsOrigin) return true;
+    return o.host === req.headers.host || o.host === req.headers['x-forwarded-host'];
+  } catch { return false; }
+}
+
 export function attachRealtime(server) {
-  const io = new Server(server, { path: '/socket.io', serveClient: false, cors: config.corsOrigin ? { origin: config.corsOrigin, credentials: true } : undefined });
+  const io = new Server(server, {
+    path: '/socket.io', serveClient: false,
+    cors: config.corsOrigin ? { origin: config.corsOrigin, credentials: true } : undefined,
+    allowRequest: (req, cb) => cb(null, originAllowed(req)),
+  });
   io.use(async (socket, next) => {
     try {
       const cookies = parseCookie(socket.handshake.headers.cookie || '');
       const token = cookies[SESSION_COOKIE] || socket.handshake.auth?.token;
       const user = await userFromToken(token);
       if (!user || user.mustChangePassword) return next(new Error('unauthorized'));
-      socket.data.user = user;
+      // aucun salon par permission : l'autorisation est vérifiée à chaque livraison
+      socket.data = { userId: user.id, sessionId: user.sessionId, expiresAt: user.sessionExpiresAt, user, checkedAt: Date.now() };
       next();
     } catch (e) { next(e); }
   });
   io.on('connection', (socket) => {
-    const u = socket.data.user;
-    socket.join(`user:${u.id}`);
-    for (const p of u.permissions) socket.join(`perm:${p}`);
-    connected(u.id);
-    socket.on('disconnect', () => disconnected(u.id));
+    connected(socket.data.userId);
+    socket.on('disconnect', () => disconnected(socket.data.userId));
   });
   setIo(io);
+  startRealtimeSweep();
   return io;
 }
 

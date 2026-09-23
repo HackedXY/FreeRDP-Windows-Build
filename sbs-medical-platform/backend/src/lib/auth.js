@@ -24,9 +24,14 @@ export async function loadPermissions(db, userId, role) {
 /** Charge l'utilisateur à partir du jeton de session (cookie ou en-tête). */
 export async function userFromToken(token) {
   if (!token) return null;
-  const sid = sha256(token);
+  return userFromSessionId(sha256(token));
+}
+
+/** Charge l'utilisateur à partir de l'identifiant (haché) d'une session valide. */
+export async function userFromSessionId(sid) {
+  if (!sid) return null;
   const { rows } = await query(
-    `SELECT s.id AS session_id, s.last_seen_at, u.id, u.username, u.first_name, u.last_name, u.site_id,
+    `SELECT s.id AS session_id, s.last_seen_at, s.expires_at, u.id, u.username, u.first_name, u.last_name, u.site_id,
             u.must_change_password, u.status, u.job_title, u.employee_number,
             r.id AS role_id, r.code AS role_code, r.name AS role_name, r.is_superadmin
      FROM sessions s JOIN users u ON u.id = s.user_id JOIN roles r ON r.id = u.role_id
@@ -42,6 +47,7 @@ export async function userFromToken(token) {
   return {
     id: row.id,
     sessionId: row.session_id,
+    sessionExpiresAt: new Date(row.expires_at).getTime(),
     username: row.username,
     firstName: row.first_name,
     lastName: row.last_name,

@@ -10,6 +10,7 @@ import { SESSION_COOKIE, cookieOptions, requireAuth } from '../lib/auth.js';
 import { audit } from '../lib/audit.js';
 import { raiseAlert } from '../lib/notify.js';
 import { getSettings } from '../lib/settings.js';
+import { disconnectSession, refreshRealtime } from '../lib/realtime.js';
 
 const router = Router();
 const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', 10);
@@ -127,6 +128,8 @@ router.post('/logout', ah(async (req, res) => {
       await recordLoginEvent(db, { userId: req.user.id, username: req.user.username, event: 'logout', req });
       await audit(db, req.ctx, { action: 'auth.logout', entityType: 'user', entityId: req.user.id, summary: `Déconnexion de ${req.user.fullName}` });
     });
+    // plus aucune donnée temps réel pour cette session
+    disconnectSession(req.user.sessionId);
   }
   res.clearCookie(SESSION_COOKIE, { ...cookieOptions(), maxAge: undefined });
   res.json({ ok: true });
@@ -165,6 +168,7 @@ router.post('/change-password', requireAuth, ah(async (req, res) => {
     await db.query('UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL', [req.user.id, req.user.sessionId]);
     await audit(db, req.ctx, { action: 'auth.password_changed', entityType: 'user', entityId: req.user.id, summary: `${req.user.fullName} a changé son mot de passe`, feed: false });
   });
+  await refreshRealtime({ userIds: [req.user.id] }); // les autres sessions révoquées perdent leur flux
   res.json({ ok: true });
 }));
 

@@ -7,6 +7,7 @@ import { audit } from '../lib/audit.js';
 import { raiseAlert } from '../lib/notify.js';
 import { PERMISSION_CODES, HIGH_PRIVILEGE_PERMISSIONS } from '../lib/permissions.js';
 import { setActor, denyEscalation } from '../lib/privilege.js';
+import { refreshRealtime } from '../lib/realtime.js';
 
 // Modifier un rôle revient à accorder des permissions : réservé au propriétaire,
 // même pour un employé disposant de « roles.manage ».
@@ -94,6 +95,7 @@ router.put('/:id', requirePerm('roles.manage'), ah(async (req, res) => {
       });
     }
   });
+  await refreshRealtime(); // tous les titulaires du rôle : droits réévalués avant la réponse
   res.json({ ok: true });
 }));
 
