@@ -1,7 +1,8 @@
 // Catalogue des permissions. Les rôles (y compris personnalisés) sont des
 // ensembles de ces codes, configurables par l'administrateur.
 export const PERMISSIONS = [
-  ['dashboard.view', 'Tableau de bord', 'Voir le tableau de bord'],
+  ['dashboard.view', 'Tableau de bord', 'Voir le tableau de bord médical (patients, consultations, examens, rendez-vous)'],
+  ['dashboard.finance', 'Tableau de bord', 'Voir les indicateurs financiers (recettes, caisse, dépenses, écarts) et le fil d\'activité'],
 
   ['patients.view', 'Patients', 'Voir les patients (identité)'],
   ['patients.view_medical', 'Patients', 'Voir le dossier médical complet'],
@@ -71,7 +72,7 @@ export const PERMISSION_CODES = PERMISSIONS.map(([code]) => code);
  * peut les accorder, et seul lui peut gérer un compte qui les détient.
  */
 export const HIGH_PRIVILEGE_PERMISSIONS = new Set([
-  'users.manage', 'roles.manage', 'settings.manage', 'audit.view', 'alerts.manage',
+  'users.manage', 'roles.manage', 'settings.manage', 'audit.view', 'alerts.manage', 'dashboard.finance',
   'reports.employee', 'cash.view_all', 'expenses.validate',
   'payments.update', 'payments.cancel', 'payments.refund',
 ]);

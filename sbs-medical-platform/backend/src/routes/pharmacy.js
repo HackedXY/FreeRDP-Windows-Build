@@ -37,7 +37,9 @@ router.get('/products', requirePerm('pharmacy.view', 'pharmacy.sell', 'prescript
        (SELECT min(expiry_date) FROM product_lots l WHERE l.product_id = p.id AND l.quantity > 0) AS next_expiry
      FROM products p LEFT JOIN suppliers s ON s.id = p.supplier_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY p.name LIMIT 1000`, vals);
-  res.json(rows.map((p) => ({ ...p, stock_status: p.quantity === 0 ? 'epuise' : p.quantity <= p.min_threshold ? 'faible' : 'ok' })));
+  // Prix d'achat (données financières) réservés à la gestion de la pharmacie
+  const costs = can(req.user, 'pharmacy.manage') || can(req.user, 'stock.move');
+  res.json(rows.map(({ purchase_price, ...p }) => ({ ...p, ...(costs ? { purchase_price } : {}), stock_status: p.quantity === 0 ? 'epuise' : p.quantity <= p.min_threshold ? 'faible' : 'ok' })));
 }));
 
 router.get('/products/:id', requirePerm('pharmacy.view'), ah(async (req, res) => {
@@ -50,6 +52,8 @@ router.get('/products/:id', requirePerm('pharmacy.view'), ah(async (req, res) =>
     `SELECT m.*, u.first_name || ' ' || u.last_name AS user_name, l.lot_number
      FROM stock_movements m LEFT JOIN users u ON u.id = m.created_by LEFT JOIN product_lots l ON l.id = m.lot_id
      WHERE m.product_id = $1 ORDER BY m.id DESC LIMIT 300`, [id]);
+  const costs = can(req.user, 'pharmacy.manage') || can(req.user, 'stock.move');
+  if (!costs) { delete p.purchase_price; for (const m of movements) delete m.unit_cost; }
   res.json({ ...p, lots, movements });
 }));
 
@@ -181,7 +185,7 @@ router.post('/stock/out', requirePerm('stock.move'), ah(async (req, res) => {
 }));
 
 // ------------------------------------------------------------------ Ventes
-router.get('/sales', requirePerm('pharmacy.view', 'pharmacy.sell', 'payments.view'), ah(async (req, res) => {
+router.get('/sales', requirePerm('pharmacy.sell', 'payments.view'), ah(async (req, res) => {
   const { limit, offset } = paging(req);
   const where = []; const vals = [];
   addPeriod(where, vals, 's.created_at', req.query);
@@ -239,7 +243,7 @@ router.post('/sales', requirePerm('pharmacy.sell'), ah(async (req, res) => {
         method: d.payment.method, reference: d.payment.reference, discount: d.payment.discount || 0,
       }));
     }
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'pharmacy' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'pharmacy' });
     return { ...s, items: lines, payment };
   });
   res.status(201).json(out);

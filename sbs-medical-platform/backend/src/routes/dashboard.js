@@ -1,13 +1,18 @@
 import { Router } from 'express';
 import { query } from '../db/pool.js';
 import { ah } from '../lib/errors.js';
-import { requirePerm } from '../lib/auth.js';
+import { requirePerm, can } from '../lib/auth.js';
 import { onlineUserIds } from '../lib/presence.js';
 import { sessionTotals } from './cash.js';
 
 const router = Router();
 
-router.get('/', requirePerm('dashboard.view'), ah(async (_req, res) => {
+/**
+ * Tableau de bord scindé :
+ *  - dashboard.view    : volet médical / opérationnel (patients, consultations, examens, rendez-vous, stock) ;
+ *  - dashboard.finance : recettes, dépenses, caisse, ventes, encaissements, fil d'activité (propriétaire).
+ */
+router.get('/', requirePerm('dashboard.view', 'dashboard.finance'), ah(async (req, res) => {
   const today = `created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + 1`;
   const [k, byMethod, openSessions, lastClosed, series, activity, users, alerts, pending, consultStatus] = await Promise.all([
     query(`SELECT
@@ -58,19 +63,31 @@ router.get('/', requirePerm('dashboard.view'), ah(async (_req, res) => {
     cashTheoretical += t.expected_balance;
     sessions.push({ ...s, ...t });
   }
-  const online = onlineUserIds();
-  res.json({
-    ...k.rows[0],
-    revenue_by_method: byMethod.rows,
-    cash: { open_sessions: sessions, theoretical: cashTheoretical, last_closed: lastClosed.rows[0] || null },
-    series: series.rows,
-    activity: activity.rows,
-    employees: { ...users.rows[0], online: online.length },
-    alerts: alerts.rows[0],
-    pending: pending.rows[0],
+  const k0 = k.rows[0];
+  const out = {
+    patients_today: k0.patients_today, new_patients: k0.new_patients, consultations: k0.consultations,
+    lab_requests: k0.lab_requests, appointments: k0.appointments,
     consultations_by_status: Object.fromEntries(consultStatus.rows.map((r) => [r.status, r.n])),
+    pending: { lab_pending: pending.rows[0].lab_pending, low_stock: pending.rows[0].low_stock },
+    series: series.rows.map((r) => ({ day: r.day, consultations: r.consultations })),
+    finance: false,
     generated_at: new Date(),
-  });
+  };
+  if (can(req.user, 'dashboard.finance')) {
+    Object.assign(out, {
+      finance: true,
+      revenue: k0.revenue, payment_count: k0.payment_count, refunds: k0.refunds, expenses: k0.expenses,
+      pharmacy_sales: k0.pharmacy_sales, lab_revenue: k0.lab_revenue,
+      revenue_by_method: byMethod.rows,
+      cash: { open_sessions: sessions, theoretical: cashTheoretical, last_closed: lastClosed.rows[0] || null },
+      series: series.rows,
+      activity: activity.rows,
+      pending: { ...out.pending, expenses_to_validate: pending.rows[0].expenses_to_validate, unpaid_consultations: pending.rows[0].unpaid_consultations },
+    });
+  }
+  if (can(req.user, 'dashboard.finance') || can(req.user, 'users.view')) out.employees = { ...users.rows[0], online: onlineUserIds().length };
+  if (can(req.user, 'alerts.view')) out.alerts = alerts.rows[0];
+  res.json(out);
 }));
 
 export default router;

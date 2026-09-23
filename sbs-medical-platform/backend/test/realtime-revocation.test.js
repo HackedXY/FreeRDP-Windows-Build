@@ -6,7 +6,7 @@ import { resetDb, adminAgent, employee, login, ownerPool, app, closePools } from
 const { attachRealtime } = await import('../src/server.js');
 
 // Permission donnant accès au flux financier du tableau de bord
-const FIN = 'dashboard.view';
+const FIN = 'dashboard.finance';
 let server, url, admin, cashier, roleId;
 const cookieOf = (a) => a.loginRes.headers['set-cookie'][0].split(';')[0];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

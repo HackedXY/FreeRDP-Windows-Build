@@ -49,7 +49,7 @@ router.get('/registers', ah(async (_req, res) => {
   res.json(rows);
 }));
 
-router.get('/current', requirePerm('cash.operate', 'cash.view_all', 'payments.create', 'dashboard.view'), ah(async (req, res) => {
+router.get('/current', requirePerm('cash.operate', 'cash.view_all', 'payments.create', 'dashboard.finance'), ah(async (req, res) => {
   const { rows } = await query(
     `SELECT s.*, r.name AS register_name, u.first_name || ' ' || u.last_name AS opened_by_name
      FROM cash_sessions s JOIN cash_registers r ON r.id = s.register_id JOIN users u ON u.id = s.opened_by
@@ -83,7 +83,7 @@ router.post('/open', requirePerm('cash.operate'), ah(async (req, res) => {
       newValue: { opening_balance: d.opening_balance, last_declared_balance: last?.declared_balance ?? null },
       feed: { kind: 'cash' },
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'cash' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'cash' });
     return s;
   });
   res.status(201).json(session);
@@ -133,7 +133,7 @@ router.post('/close', requirePerm('cash.operate'), ah(async (req, res) => {
       body: `${s.number} — déclarée ${fmtGNF(d.declared_balance)}${discrepancy ? `, écart ${fmtGNF(discrepancy)}` : ''}`,
       link: `/caisse/sessions/${s.id}`,
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'cash' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'cash' });
     return { ...closed, ...totals, expected_balance: totals.expected_balance };
   });
   res.json(result);

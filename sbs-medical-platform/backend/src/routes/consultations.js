@@ -154,7 +154,7 @@ router.post('/', requirePerm('consultations.create'), ah(async (req, res) => {
       action: 'consultation.create', entityType: 'consultation', entityId: c.id,
       summary: `Consultation ${number} — ${patientRef(p)}`, feed: { kind: 'consultation' },
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
+    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' }); req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'consultation' });
     return getFull(db, c.id, req.user);
   });
   res.status(201).json(out);
@@ -211,7 +211,7 @@ router.put('/:id', requirePerm('consultations.update', 'consultations.vitals', '
           body: `${before.number} — ${patientRef(p)} — ${fmtGNF(c.amount)}`, link: `/paiements/nouveau?source=consultation&id=${id}`,
         });
       }
-      req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' });
+      req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'consultation' }); req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'consultation' });
     }
     return getFull(db, id, req.user);
   });

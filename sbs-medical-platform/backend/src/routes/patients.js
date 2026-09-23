@@ -149,7 +149,7 @@ router.post('/', requirePerm('patients.create'), ah(async (req, res) => {
       permission: 'dashboard.view', type: 'patient', icon: '👤',
       title: 'Nouveau patient', body: number, link: `/patients/${p.id}`,
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'patient' });
+    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'patient' }); req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'patient' });
     return p;
   });
   res.status(201).json(presentPatient(patient, req.user));

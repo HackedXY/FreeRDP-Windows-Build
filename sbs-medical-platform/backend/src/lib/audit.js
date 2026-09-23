@@ -41,7 +41,7 @@ export async function audit(db, ctx, {
   await db.query('INSERT INTO audit_signatures (audit_id, key_id, sig) VALUES ($1,$2,$3)',
     [rows[0].id, auditKeyId(), signAuditHash(rows[0].id, rows[0].hash)]);
   if (ctx && !NOT_IN_FEED.has(action) && feed !== false) {
-    ctx.emit('perm:dashboard.view', 'activity', {
+    ctx.emit('perm:dashboard.finance', 'activity', {
       id: rows[0].id,
       at: rows[0].created_at,
       action,

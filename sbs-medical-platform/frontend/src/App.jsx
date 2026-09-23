@@ -22,7 +22,7 @@ import Settings from './pages/Settings.jsx';
 
 function Home() {
   const { can } = useAuth();
-  if (can('dashboard.view')) return <Dashboard />;
+  if (can('dashboard.view', 'dashboard.finance')) return <Dashboard />;
   const first = [
     ['consultations.view', '/consultations'], ['payments.create', '/paiements/nouveau'], ['pharmacy.sell', '/pharmacie'],
     ['lab.results', '/laboratoire'], ['patients.view', '/patients'], ['appointments.view', '/rendez-vous'],

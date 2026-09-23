@@ -78,7 +78,7 @@ alerts.put('/:id', requirePerm('alerts.manage'), ah(async (req, res) => {
       oldValue: { status: before.status }, newValue: { status: d.status }, reason: d.resolution_note || null, feed: false,
     });
     req.ctx.emit('perm:alerts.view', 'alert_update', a);
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'alert' });
+    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'alert' }); req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'alert' });
     return a;
   });
   res.json(out);

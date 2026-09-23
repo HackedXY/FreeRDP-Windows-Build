@@ -8,7 +8,7 @@ import { gnf, dateTime } from '../format.js';
 
 const NAV = [
   { section: 'Pilotage' },
-  { to: '/', label: 'Tableau de bord', icon: '📊', perm: ['dashboard.view'], end: true },
+  { to: '/', label: 'Tableau de bord', icon: '📊', perm: ['dashboard.view', 'dashboard.finance'], end: true },
   { to: '/alertes', label: 'Alertes', icon: '⚠️', perm: ['alerts.view'], badge: 'alerts' },
   { to: '/rapports', label: 'Rapports', icon: '📈', perm: ['reports.view'] },
   { section: 'Médical' },

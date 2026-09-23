@@ -6,6 +6,27 @@ import { useRealtime } from '../realtime.js';
 import { Card, Stat, BarChart, Empty, Badge, useToast } from '../components/ui.jsx';
 import { gnf, num, time, LABELS } from '../format.js';
 
+/** Volet médical / opérationnel : aucune donnée financière (recettes, caisse, dépenses). */
+function MedicalDashboard({ d }) {
+  const series = d.series.map((s) => ({ ...s, label: new Date(s.day).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' }) }));
+  return (
+    <>
+      <div className="page-header"><div><h1>Activité médicale du jour</h1>
+        <p className="muted">{new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · mis à jour à {time(d.generated_at)}</p></div></div>
+      <div className="stats">
+        <Stat icon="👥" label="Patients aujourd'hui" value={num(d.patients_today)} sub={`${d.new_patients} nouveau(x)`} to="/patients" />
+        <Stat icon="🩺" label="Consultations" value={num(d.consultations)} sub={`${d.consultations_by_status.terminee || 0} terminée(s) · ${d.consultations_by_status.en_attente || 0} en attente`} to="/consultations" />
+        <Stat icon="🧪" label="Examens en attente" value={num(d.pending.lab_pending)} to="/laboratoire" />
+        <Stat icon="📅" label="Rendez-vous aujourd'hui" value={num(d.appointments)} to="/rendez-vous" />
+        <Stat icon="📦" label="Produits sous le seuil" value={num(d.pending.low_stock)} tone={d.pending.low_stock ? 'warn' : ''} to="/pharmacie" />
+      </div>
+      <Card title="Consultations — 7 derniers jours">
+        <BarChart data={series} series={[{ key: 'consultations', label: 'Consultations', className: 'consults' }]} format={num} />
+      </Card>
+    </>
+  );
+}
+
 export default function Dashboard() {
   const { clinic } = useAuth();
   const toast = useToast();
@@ -34,6 +55,7 @@ export default function Dashboard() {
   });
 
   if (!d) return <Empty>Chargement du tableau de bord…</Empty>;
+  if (!d.finance) return <MedicalDashboard d={d} />;
   const series = d.series.map((s) => ({ ...s, label: new Date(s.day).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' }) }));
   const openCash = d.cash.open_sessions.length > 0;
   return (

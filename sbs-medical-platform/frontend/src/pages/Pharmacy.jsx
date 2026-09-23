@@ -183,7 +183,7 @@ export function Pharmacy() {
       <Tabs value={tab} onChange={(t) => { setTab(t); setPage(1); }} tabs={[
         can('pharmacy.view') && { key: 'products', label: 'Produits' },
         can('pharmacy.sell') && { key: 'sale', label: 'Vente' },
-        { key: 'sales', label: 'Ventes' },
+        can('pharmacy.sell', 'payments.view') && { key: 'sales', label: 'Ventes' },
         can('pharmacy.view') && { key: 'movements', label: 'Mouvements' },
         can('stock.inventory') && { key: 'inventories', label: 'Inventaires' },
       ]} />
@@ -193,7 +193,7 @@ export function Pharmacy() {
             <input type="search" placeholder="Nom, référence…" value={q} onChange={(e) => setQ(e.target.value)} />
             <select value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Catégorie"><option value="">Toutes catégories</option>{Object.entries(LABELS.category).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
             <label className="check"><input type="checkbox" checked={low} onChange={(e) => setLow(e.target.checked)} /> Sous le seuil</label>
-            <span className="grow" /><span className="muted small">Valeur du stock (achat) : <b>{gnf(stockValue)}</b></span>
+            <span className="grow" />{products?.[0]?.purchase_price !== undefined && <span className="muted small">Valeur du stock (achat) : <b>{gnf(stockValue)}</b></span>}
           </div>
           <Table rows={products} onRowClick={(r) => nav(`/pharmacie/produits/${r.id}`)} columns={[
             { key: 'name', label: 'Produit', render: (r) => <><b>{r.name}</b>{!r.active && <Badge tone="muted">inactif</Badge>}<div className="muted small">{r.reference} · {LABELS.category[r.category]}</div></> },
@@ -282,9 +282,9 @@ export function ProductDetail() {
       </PageHeader>
       <div className="stats">
         <div className="stat"><div className="stat-body"><div className="stat-label">Stock</div><div className="stat-value">{num(p.quantity)}</div><div className="stat-sub">seuil {p.min_threshold}</div></div></div>
-        <div className="stat"><div className="stat-body"><div className="stat-label">Prix d'achat</div><div className="stat-value">{gnf(p.purchase_price)}</div></div></div>
-        <div className="stat"><div className="stat-body"><div className="stat-label">Prix de vente</div><div className="stat-value">{gnf(p.sale_price)}</div><div className="stat-sub">marge {gnf(p.sale_price - p.purchase_price)}</div></div></div>
-        <div className="stat"><div className="stat-body"><div className="stat-label">Valeur du stock</div><div className="stat-value">{gnf(p.quantity * p.purchase_price)}</div></div></div>
+        {p.purchase_price !== undefined && <div className="stat"><div className="stat-body"><div className="stat-label">Prix d'achat</div><div className="stat-value">{gnf(p.purchase_price)}</div></div></div>}
+        <div className="stat"><div className="stat-body"><div className="stat-label">Prix de vente</div><div className="stat-value">{gnf(p.sale_price)}</div>{p.purchase_price !== undefined && <div className="stat-sub">marge {gnf(p.sale_price - p.purchase_price)}</div>}</div></div>
+        {p.purchase_price !== undefined && <div className="stat"><div className="stat-body"><div className="stat-label">Valeur du stock</div><div className="stat-value">{gnf(p.quantity * p.purchase_price)}</div></div></div>}
       </div>
       <Card title="Lots">
         <Table rows={p.lots.filter((l) => l.quantity > 0)} empty="Aucun lot en stock" columns={[

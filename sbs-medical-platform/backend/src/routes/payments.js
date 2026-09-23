@@ -173,10 +173,10 @@ export async function createPayment(db, req, input) {
     feed: { kind: 'payment', amount: net },
   });
   await notify(db, req.ctx, {
-    permission: 'dashboard.view', type: 'payment', icon: '🔔', title: 'Nouveau paiement enregistré',
+    permission: 'dashboard.finance', type: 'payment', icon: '🔔', title: 'Nouveau paiement enregistré',
     body: `+${fmtGNF(net)} — ${description} (${req.user.fullName})`, link: `/paiements/${py.id}`,
   });
-  req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'payment', amount: net });
+  req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'payment' });
   if (d.discount > 0 && (d.discount / gross) * 100 >= settings.finance.discount_alert_percent) {
     await raiseAlert(db, req.ctx, {
       category: 'financiere', type: 'remise_importante', severity: 'moyenne',
@@ -245,7 +245,7 @@ router.put('/:id', requirePerm('payments.update'), ah(async (req, res) => {
       details: { message: `${fmtGNF(before.amount)} (${METHOD_LABELS[before.method]}) → ${fmtGNF(newNet)} (${METHOD_LABELS[newMethod]}) par ${req.user.fullName} — motif : ${d.reason}`, oldValue, newValue },
       refType: 'payment', refId: id, userId: req.user.id, link: `/paiements/${id}`,
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'payment' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'payment' });
     return getPayment(db, id);
   });
   res.json(out);
@@ -289,7 +289,7 @@ async function reversePayment(req, id, kind) {
       details: { message: `Par ${req.user.fullName} — motif : ${reason}` },
       refType: 'payment', refId: id, userId: req.user.id, link: `/paiements/${id}`,
     });
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'payment' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'payment' });
     return getPayment(db, id);
   });
 }

@@ -69,7 +69,7 @@ async function disburse(db, req, e) {
     action: 'expense.disburse', entityType: 'expense', entityId: e.id,
     summary: `Décaissement ${e.number} — ${fmtGNF(e.amount)} (${e.category})`, feed: { kind: 'expense', amount: e.amount },
   });
-  req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'expense' });
+  req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'expense' });
 }
 
 router.post('/', requirePerm('expenses.create'), upload.single('attachment'), ah(async (req, res) => {
@@ -101,7 +101,7 @@ router.post('/', requirePerm('expenses.create'), upload.single('attachment'), ah
       feed: { kind: 'expense', amount: d.amount },
     });
     await notify(db, req.ctx, {
-      permission: requiresValidation ? 'expenses.validate' : 'dashboard.view', type: 'expense', icon: '💰',
+      permission: requiresValidation ? 'expenses.validate' : 'dashboard.finance', type: 'expense', icon: '💰',
       title: requiresValidation ? 'Dépense à valider' : 'Nouvelle dépense',
       body: `${fmtGNF(d.amount)} — ${d.category} : ${d.reason} (${req.user.fullName})`, link: `/depenses?id=${e.id}`,
     });
@@ -122,7 +122,7 @@ router.post('/', requirePerm('expenses.create'), upload.single('attachment'), ah
       if (!can(req.user, 'expenses.disburse') && !can(req.user, 'cash.operate')) throw badRequest('Vous n\'êtes pas autorisé à décaisser.');
       await disburse(db, req, e);
     }
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'expense' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'expense' });
     return getExpense(db, e.id);
   });
   res.status(201).json(expense);
@@ -152,7 +152,7 @@ router.post('/:id/validate', requirePerm('expenses.validate'), ah(async (req, re
           `${e.number} — ${fmtGNF(e.amount)}${d.comment ? ` : ${d.comment}` : ''}`, `/depenses?id=${id}`]);
       req.ctx.emit(`user:${creator.id}`, 'notification', { title: `Dépense ${d.decision === 'validee' ? 'validée' : 'refusée'}` });
     }
-    req.ctx.emit('perm:dashboard.view', 'stats', { kind: 'expense' });
+    req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'expense' });
     return getExpense(db, id);
   });
   res.json(out);
