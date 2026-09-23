@@ -9,6 +9,7 @@ import { setIo, makeContext } from './lib/realtime.js';
 import { userFromToken, SESSION_COOKIE } from './lib/auth.js';
 import { connected, disconnected } from './lib/presence.js';
 import { checkExpiries } from './lib/stock.js';
+import { checkBackups } from './lib/backupmon.js';
 import { tx, pool } from './db/pool.js';
 
 /**
@@ -54,6 +55,7 @@ async function runPeriodicChecks() {
   try {
     const ctx = makeContext({ deferred: false });
     await tx((db) => checkExpiries(db, ctx));
+    if (config.backupMonitoring) await tx((db) => checkBackups(db, ctx, { maxAgeHours: config.backupMaxAgeHours }));
   } catch (e) { console.error('Contrôle périodique en échec :', e.message); }
 }
 

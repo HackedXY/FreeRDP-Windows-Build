@@ -67,11 +67,20 @@ export default function Settings() {
             <button className="btn">+ Ajouter</button>
           </form>
         </Card>
-        <Card title="Sauvegardes">
-          {!backups?.configured ? <p className="muted">Le répertoire des sauvegardes n'est pas monté sur ce serveur. Voir la documentation d'exploitation (sauvegarde automatique quotidienne chiffrée, copie hors serveur).</p> : (
+        <Card title="Sauvegardes (hors serveur, chiffrées)">
+          {!backups ? <Empty>Chargement…</Empty> : (
             <>
-              <p>Dernière sauvegarde : <b>{backups.last ? dateTime(backups.last.modified) : 'aucune'}</b></p>
-              <Table rows={backups.files.slice(0, 10)} columns={[{ key: 'name', label: 'Fichier' }, { key: 'modified', label: 'Date', render: (r) => dateTime(r.modified) }, { key: 'size', label: 'Taille', align: 'right', render: (r) => `${(r.size / 1048576).toFixed(1)} Mo` }]} />
+              {backups.stale
+                ? <div className="alert-box danger">Aucune sauvegarde réussie depuis plus de {backups.max_age_hours} h.</div>
+                : <div className="alert-box ok">Dernière sauvegarde réussie : {dateTime(backups.last_success.finished_at)} ({backups.last_success.target_kind})</div>}
+              {!backups.monitoring && <p className="hint">Surveillance désactivée sur cet environnement (activée par défaut en production).</p>}
+              <Table rows={backups.runs.slice(0, 10)} empty="Aucune sauvegarde enregistrée" columns={[
+                { key: 'started_at', label: 'Date', render: (r) => dateTime(r.started_at) },
+                { key: 'status', label: 'Statut', render: (r) => <span className={`badge ${r.status === 'success' ? 'ok' : r.status === 'failed' ? 'danger' : 'info'}`}>{r.status === 'success' ? 'Réussie' : r.status === 'failed' ? 'Échec' : 'En cours'}</span> },
+                { key: 'set_name', label: 'Jeu' },
+                { key: 'size', label: 'Taille', align: 'right', render: (r) => r.db_bytes ? `${((r.db_bytes + (r.uploads_bytes || 0)) / 1048576).toFixed(1)} Mo` : '—' },
+                { key: 'error', label: 'Erreur', render: (r) => r.error || '' },
+              ]} />
             </>
           )}
         </Card>

@@ -9,7 +9,8 @@ RUN npm run build
 # ---- API + fichiers statiques ----
 FROM node:22-alpine
 ENV NODE_ENV=production STATIC_DIR=/app/public UPLOAD_DIR=/data/uploads TZ=Africa/Conakry
-RUN apk add --no-cache tzdata
+# Client PostgreSQL (pg_dump/pg_restore) et rclone pour le service de sauvegarde
+RUN apk add --no-cache tzdata postgresql16-client rclone tar
 WORKDIR /app
 COPY backend/package*.json ./
 RUN npm ci --omit=dev

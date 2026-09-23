@@ -36,16 +36,57 @@ Tests d'intégration (base `sbs_test` requise) : `cd backend && npm test`.
 ## Mise en production
 
 ```bash
-cp .env.example .env        # remplir DOMAIN, DB_PASSWORD, DATA_ENCRYPTION_KEY (openssl rand -base64 32), BACKUP_PASSPHRASE
-docker compose up -d --build
-docker compose logs app | grep -A2 "Compte administrateur"   # mot de passe initial si ADMIN_PASSWORD vide
+cp .env.example .env        # remplir DOMAIN, les 4 mots de passe PostgreSQL, DATA_ENCRYPTION_KEY et AUDIT_HMAC_KEY
+                            # (openssl rand -base64 32), BACKUP_TARGET ; préparer secrets/ (voir « Sauvegardes »)
+docker compose up -d --build   # db → migrate (identifiants propriétaire, puis s'arrête) → app, backup, caddy
+docker compose logs migrate | grep -A2 "Compte administrateur"   # mot de passe initial si ADMIN_PASSWORD vide
 ```
 
 * **HTTPS** : Caddy obtient et renouvelle automatiquement le certificat pour `DOMAIN`.
-* **Sauvegardes** : service `backup` — dump quotidien chiffré (AES-256) de la base et des justificatifs dans `./backups`, rotation après `BACKUP_KEEP_DAYS` jours.
-  Pour une copie **séparée du serveur principal**, synchroniser `./backups` vers un stockage distant (ex. `rclone sync ./backups distant:sbs` en cron sur l'hôte).
-  Restauration : `docker compose stop app && ./deploy/restore.sh backups/sbs-db-….dump.enc && docker compose start app`.
-* ⚠️ Conserver `DATA_ENCRYPTION_KEY` et `BACKUP_PASSPHRASE` **hors du serveur** (coffre, papier en lieu sûr) : sans elles, données médicales et sauvegardes sont illisibles.
+* **Rôles PostgreSQL séparés** : `sbs` (propriétaire, service `migrate` uniquement), `sbs_app` (application, ne peut ni altérer
+  le schéma ni réécrire l'audit — l'API refuse de démarrer avec des droits propriétaire), `sbs_backup` (lecture seule).
+  Mise à jour du schéma : `docker compose run --rm migrate`.
+* ⚠️ Conserver `DATA_ENCRYPTION_KEY`, `AUDIT_HMAC_KEY` et la clé privée de sauvegarde **hors du serveur** (coffre, support hors ligne) : sans elles, données médicales et sauvegardes sont illisibles.
+
+## Sauvegardes & restauration
+
+**Principe.** Le service `backup` (rôle PostgreSQL `sbs_backup`, lecture seule) réalise chaque nuit un dump de la base
+et une archive des justificatifs, **chiffrés à la volée** (AES-256-GCM ; clé de données enveloppée par une clé publique RSA-4096),
+puis les envoie via **rclone vers un stockage distinct du serveur** (S3, Backblaze B2, SFTP d'un autre site…). Aucune copie en clair
+n'est écrite sur disque ; le serveur ne détient **que la clé publique** et ne peut donc pas relire les sauvegardes.
+Chaque exécution est inscrite dans `backup_runs` ; l'application déclenche une **alerte haute** si une sauvegarde échoue
+ou si aucune n'a réussi depuis 26 h (`BACKUP_MAX_AGE_HOURS`), et la page *Paramètres* affiche l'historique.
+Le manifeste de chaque sauvegarde contient l'empreinte des fichiers et l'**ancre du journal d'audit** (dernière entrée).
+
+**Mise en place (une fois).**
+```bash
+mkdir -p secrets && chmod 700 secrets
+# 1. Paire de clés — sur un poste de confiance ; la clé privée ne doit jamais rester sur le serveur
+BACKUP_KEY_PASSPHRASE='<phrase longue>' node backend/src/backup/keygen.js --out ./cles-sauvegarde
+cp ./cles-sauvegarde/backup-public.pem secrets/     # puis ranger backup-private.pem + la phrase hors ligne
+# 2. Stockage distant : secrets/rclone.env (exemple S3), jamais versionné
+#    RCLONE_CONFIG_DISTANT_TYPE=s3
+#    RCLONE_CONFIG_DISTANT_PROVIDER=…  RCLONE_CONFIG_DISTANT_ACCESS_KEY_ID=…  RCLONE_CONFIG_DISTANT_SECRET_ACCESS_KEY=…
+#    RCLONE_CONFIG_DISTANT_ENDPOINT=…
+# 3. Test immédiat
+docker compose run --rm backup node src/backup/worker.js --once
+```
+Donner au compte de stockage des droits **d'écriture sans suppression** lorsque le fournisseur le permet (verrouillage d'objets /
+versionnage), afin qu'une compromission du serveur ne puisse pas effacer l'historique distant.
+
+**Restauration (procédure testée automatiquement).**
+```bash
+# Sur un poste disposant de la clé privée ; base cible NEUVE créée par le propriétaire du schéma
+BACKUP_TARGET=rclone:distant:sbs-sauvegardes \
+RESTORE_DATABASE_URL=postgres://sbs:…@hote:5432/sbs_restauree \
+BACKUP_KEY_PASSPHRASE='…' AUDIT_HMAC_KEY='…' \
+node backend/src/backup/restore.js --private-key ./backup-private.pem --set latest \
+     --uploads-dir /chemin/vers/uploads-vide --audit-key-env AUDIT_HMAC_KEY
+```
+Le script refuse une base cible non vide, vérifie les empreintes, l'authenticité du chiffrement, restaure en **une seule
+transaction**, réapplique les droits applicatifs, vérifie le journal d'audit (chaîne, ancre du manifeste, signatures HMAC)
+puis restaure et contrôle chaque justificatif. Pour basculer la production : arrêter `app`, restaurer dans une base neuve,
+la renommer (ou pointer `DATABASE_URL` dessus), redémarrer. Tester une restauration complète **au moins une fois par mois**.
 
 ## Fonctionnalités par rapport au cahier des charges
 

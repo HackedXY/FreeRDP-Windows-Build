@@ -46,6 +46,7 @@ services:
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY}
       AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY}
       COOKIE_SECURE: "true"
+      BACKUP_MONITORING: "on"
     volumes:
       - uploads:/data/uploads
 
@@ -61,25 +62,30 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
 
-  # Sauvegarde automatique quotidienne, chiffrée, avec rotation
+  # Sauvegarde quotidienne HORS SERVEUR : dump chiffré avec la clé PUBLIQUE (le serveur ne peut
+  # pas relire les sauvegardes), envoi via rclone (S3/Backblaze/SFTP…), rétention, journal dans
+  # backup_runs. L'application alerte (haute) en cas d'échec ou d'absence de sauvegarde > 26 h.
   backup:
-    image: postgres:16-alpine
+    build: .
     restart: unless-stopped
-    depends_on: [db]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    command: ["node", "src/backup/worker.js"]
     environment:
-      PGHOST: db
-      PGUSER: sbs_backup
-      PGPASSWORD: ${BACKUP_DB_PASSWORD}
-      PGDATABASE: sbs
-      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE requis}
+      NODE_ENV: production
+      BACKUP_DATABASE_URL: postgres://sbs_backup:${BACKUP_DB_PASSWORD}@db:5432/sbs   # lecture seule
+      BACKUP_TARGET: ${BACKUP_TARGET:?BACKUP_TARGET requis (ex. rclone:distant:sbs-sauvegardes)}
+      BACKUP_PUBLIC_KEY_FILE: /run/secrets/backup-public.pem
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
       BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      UPLOAD_DIR: /data/uploads
       TZ: Africa/Conakry
+    env_file:
+      - path: ./secrets/rclone.env        # RCLONE_CONFIG_DISTANT_* (identifiants du stockage distant)
+        required: true
     volumes:
-      - ./backups:/backups
-      - uploads:/uploads:ro
-      - ./deploy/backup.sh:/backup.sh:ro
-    entrypoint: ["/bin/sh", "-c", "apk add --no-cache openssl >/dev/null && while true; do if [ \"$$(date +%H)\" = \"$$(printf %02d $$BACKUP_HOUR)\" ]; then /bin/sh /backup.sh; sleep 3700; fi; sleep 600; done"]
+      - uploads:/data/uploads:ro
+      - ./secrets/backup-public.pem:/run/secrets/backup-public.pem:ro
 
 volumes:
   pgdata:

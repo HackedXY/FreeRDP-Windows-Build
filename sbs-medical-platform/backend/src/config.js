@@ -33,6 +33,9 @@ export const config = {
   staticDir: env.STATIC_DIR || null,
   corsOrigin: env.CORS_ORIGIN || null,
   timezone: env.TZ_CABINET || 'Africa/Conakry',
+  // Surveillance des sauvegardes (alerte si échec ou absence de sauvegarde récente)
+  backupMonitoring: env.BACKUP_MONITORING ? env.BACKUP_MONITORING === 'on' : isProd,
+  backupMaxAgeHours: Number(env.BACKUP_MAX_AGE_HOURS || 26),
 };
 
 if (config.auditKey.length < 32) {

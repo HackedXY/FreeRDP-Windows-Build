@@ -4,3 +4,5 @@ uploads/
 .env
 backups/
 *.log
+secrets/
+*.pem

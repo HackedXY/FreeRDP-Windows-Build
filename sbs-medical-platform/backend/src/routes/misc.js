@@ -1,6 +1,4 @@
 import { Router } from 'express';
-import fs from 'node:fs';
-import path from 'node:path';
 import { z } from 'zod';
 import { query, tx } from '../db/pool.js';
 import { ah, parse, notFound, badRequest } from '../lib/errors.js';
@@ -10,6 +8,7 @@ import { raiseAlert } from '../lib/notify.js';
 import { getSettings, invalidateSettings } from '../lib/settings.js';
 import { paging, addPeriod } from '../lib/helpers.js';
 import { DEFAULT_SETTINGS } from '../lib/permissions.js';
+import { config } from '../config.js';
 import { auditKeyId, verifyAuditSig } from '../lib/auditsig.js';
 
 export const search = Router();
@@ -205,12 +204,12 @@ settings.post('/registers', requirePerm('settings.manage'), ah(async (req, res) 
   res.status(201).json(r);
 }));
 
-// État des sauvegardes (répertoire monté en lecture seule dans le conteneur API)
+// État des sauvegardes (journal écrit par le service de sauvegarde)
 settings.get('/backups', requirePerm('settings.manage'), ah(async (_req, res) => {
-  const dir = process.env.BACKUP_DIR;
-  if (!dir || !fs.existsSync(dir)) return res.json({ configured: false, files: [] });
-  const files = fs.readdirSync(dir).filter((f) => /\.(dump|gz|enc|age)$/.test(f))
-    .map((f) => { const st = fs.statSync(path.join(dir, f)); return { name: f, size: st.size, modified: st.mtime }; })
-    .sort((a, b) => b.modified - a.modified);
-  res.json({ configured: true, files: files.slice(0, 60), last: files[0] || null });
+  const { rows } = await query(
+    `SELECT id, started_at, finished_at, status, set_name, target_kind, db_bytes, uploads_count, uploads_bytes, error
+     FROM backup_runs ORDER BY started_at DESC LIMIT 30`);
+  const lastSuccess = rows.find((r) => r.status === 'success') || null;
+  const stale = !lastSuccess || Date.now() - new Date(lastSuccess.finished_at).getTime() > config.backupMaxAgeHours * 3600000;
+  res.json({ monitoring: config.backupMonitoring, max_age_hours: config.backupMaxAgeHours, runs: rows, last_success: lastSuccess, stale });
 }));
