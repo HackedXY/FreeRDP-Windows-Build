@@ -3,6 +3,9 @@ process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgres://sbs_app:sbs_app@localhost:5432/sbs_test';
 process.env.MIGRATION_DATABASE_URL = process.env.TEST_MIGRATION_DATABASE_URL || 'postgres://sbs:sbs@localhost:5432/sbs_test';
 process.env.ADMIN_PASSWORD = 'AdminTest2026';
+// Justificatifs de test dans un dossier temporaire dédié
+const osMod = await import('node:os'); const pathMod = await import('node:path'); const fsMod = await import('node:fs');
+process.env.UPLOAD_DIR = process.env.UPLOAD_DIR || fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'sbs-test-uploads-'));
 
 const { pool, ownerPool } = await import('../src/db/pool.js');
 const { migrate } = await import('../src/db/migrate.js');

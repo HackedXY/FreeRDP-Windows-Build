@@ -84,7 +84,16 @@ export async function runRestore({ target, set = 'latest', privateKey, restoreDa
     if (manifest.uploads) {
       if (!uploadsDir) throw new Error('Cette sauvegarde contient des justificatifs : indiquez --uploads-dir');
       report.uploads = await restoreUploads({ storage, set: chosen, manifest, work, privateKey, uploadsDir });
-      step(`justificatifs restaurés et vérifiés (${report.uploads.files} fichier(s))`);
+      // Cohérence base ↔ fichiers : chaque justificatif référencé doit être présent et intact
+      const t2 = new pg.Client({ connectionString: restoreDatabaseUrl });
+      await t2.connect();
+      try {
+        const { rows } = await t2.query('SELECT id, attachment_path FROM expenses WHERE attachment_path IS NOT NULL');
+        const missing = rows.filter((r) => !fs.existsSync(path.join(uploadsDir, path.basename(r.attachment_path))));
+        report.uploads.referenced = rows.length;
+        if (missing.length) throw new Error(`Justificatifs référencés absents après restauration : dépenses ${missing.map((m) => m.id).join(', ')}`);
+      } finally { await t2.end(); }
+      step(`justificatifs restaurés et vérifiés (${report.uploads.files} fichier(s), ${report.uploads.referenced} référencé(s) par la base)`);
     }
     report.ok = true;
     return report;
