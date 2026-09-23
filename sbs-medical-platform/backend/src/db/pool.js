@@ -10,13 +10,22 @@ pg.types.setTypeParser(1082, (v) => v);
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 15 });
 
+// Connexion « propriétaire du schéma » : migrations et initialisation uniquement.
+// En production, ces identifiants ne sont PAS fournis au conteneur de l'application.
+export const ownerPool = config.migrationDatabaseUrl && config.migrationDatabaseUrl !== config.databaseUrl
+  ? new pg.Pool({ connectionString: config.migrationDatabaseUrl, max: 3 })
+  : pool;
+
 export function query(text, params) {
   return pool.query(text, params);
 }
 
 /** Exécute fn(client) dans une transaction. */
-export async function tx(fn) {
-  const client = await pool.connect();
+export function tx(fn) { return txOn(pool, fn); }
+export function ownerTx(fn) { return txOn(ownerPool, fn); }
+
+async function txOn(p, fn) {
+  const client = await p.connect();
   try {
     await client.query('BEGIN');
     const result = await fn(client);

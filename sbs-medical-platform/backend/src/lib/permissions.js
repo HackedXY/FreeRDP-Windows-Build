@@ -66,6 +66,16 @@ export const PERMISSIONS = [
 
 export const PERMISSION_CODES = PERMISSIONS.map(([code]) => code);
 
+/**
+ * Permissions à haut privilège : seul le propriétaire (super-administrateur)
+ * peut les accorder, et seul lui peut gérer un compte qui les détient.
+ */
+export const HIGH_PRIVILEGE_PERMISSIONS = new Set([
+  'users.manage', 'roles.manage', 'settings.manage', 'audit.view', 'alerts.manage',
+  'reports.employee', 'cash.view_all', 'expenses.validate',
+  'payments.update', 'payments.cancel', 'payments.refund',
+]);
+
 export const DEFAULT_ROLES = [
   {
     code: 'admin', name: 'Administrateur', superadmin: true,

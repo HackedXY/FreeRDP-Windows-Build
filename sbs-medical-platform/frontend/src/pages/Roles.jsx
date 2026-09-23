@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api.js';
+import { useAuth } from '../auth.jsx';
 import { PageHeader, Card, useFetch, Modal, Field, ErrorBox, Badge, Empty, useToast } from '../components/ui.jsx';
 
 function RoleEditor({ role, perms, onClose, onSaved }) {
@@ -40,22 +41,25 @@ function RoleEditor({ role, perms, onClose, onSaved }) {
 
 export default function Roles() {
   const toast = useToast();
+  const { user: me } = useAuth();
+  const owner = me.superadmin;
   const { data: roles, reload } = useFetch('/roles');
   const { data: perms } = useFetch('/roles/permissions');
   const [modal, setModal] = useState(null);
   if (!roles || !perms) return <Empty>Chargement…</Empty>;
   return (
     <>
-      <PageHeader title="Rôles & permissions" subtitle="Chaque utilisateur ne voit que les données nécessaires à sa fonction">
-        <button className="btn primary" onClick={() => setModal({ role: null })}>+ Rôle personnalisé</button>
+      <PageHeader title="Rôles & permissions" subtitle={owner ? 'Chaque utilisateur ne voit que les données nécessaires à sa fonction' : 'Consultation seule : la modification des rôles est réservée au propriétaire'}>
+        {owner && <button className="btn primary" onClick={() => setModal({ role: null })}>+ Rôle personnalisé</button>}
       </PageHeader>
       <div className="grid-3">
         {roles.map((r) => (
-          <Card key={r.id} title={<>{r.name} {r.is_system && <Badge tone="muted">système</Badge>}</>} actions={!r.is_superadmin && <button className="btn sm" onClick={() => setModal({ role: r })}>Modifier</button>}>
+          <Card key={r.id} title={<>{r.name} {r.is_system && <Badge tone="muted">système</Badge>}</>} actions={owner && !r.is_superadmin && <button className="btn sm" onClick={() => setModal({ role: r })}>Modifier</button>}>
             <p className="muted small" style={{ marginTop: 0 }}>{r.description}</p>
             <p className="small"><b>{r.user_count}</b> employé(s) · <b>{r.is_superadmin ? 'toutes' : r.permissions.length}</b> permission(s)</p>
             {!r.is_superadmin && <div className="small muted">{r.permissions.map((c) => perms.find((p) => p.code === c)?.label).filter(Boolean).slice(0, 8).join(' · ')}{r.permissions.length > 8 && ' …'}</div>}
-            {!r.is_system && r.user_count === 0 && <button className="btn sm ghost" style={{ marginTop: 8 }} onClick={async () => { await api.del(`/roles/${r.id}`); toast('Rôle supprimé'); reload(); }}>Supprimer</button>}
+            {r.privileged && <p className="small"><span className="badge warn">privilégié</span> attribution réservée au propriétaire</p>}
+            {owner && !r.is_system && r.user_count === 0 && <button className="btn sm ghost" style={{ marginTop: 8 }} onClick={async () => { await api.del(`/roles/${r.id}`); toast('Rôle supprimé'); reload(); }}>Supprimer</button>}
           </Card>
         ))}
       </div>

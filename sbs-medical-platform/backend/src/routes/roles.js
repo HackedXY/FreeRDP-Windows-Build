@@ -5,12 +5,19 @@ import { ah, parse, badRequest, notFound, conflict } from '../lib/errors.js';
 import { requirePerm } from '../lib/auth.js';
 import { audit } from '../lib/audit.js';
 import { raiseAlert } from '../lib/notify.js';
-import { PERMISSION_CODES } from '../lib/permissions.js';
+import { PERMISSION_CODES, HIGH_PRIVILEGE_PERMISSIONS } from '../lib/permissions.js';
+import { setActor, denyEscalation } from '../lib/privilege.js';
+
+// Modifier un rôle revient à accorder des permissions : réservé au propriétaire,
+// même pour un employé disposant de « roles.manage ».
+async function ownerOnly(req, what) {
+  if (!req.user.superadmin) await denyEscalation(req, what, { entityType: 'role', entityId: req.params.id ?? null, attempt: req.body || null });
+}
 
 const router = Router();
 
 router.get('/permissions', requirePerm('users.view', 'users.manage', 'roles.manage'), ah(async (_req, res) => {
-  const { rows } = await query('SELECT code, module, label FROM permissions ORDER BY sort_order');
+  const { rows } = await query('SELECT code, module, label, high_privilege FROM permissions ORDER BY sort_order');
   res.json(rows);
 }));
 
@@ -21,7 +28,7 @@ router.get('/', requirePerm('users.view', 'users.manage', 'roles.manage'), ah(as
      FROM roles r LEFT JOIN role_permissions rp ON rp.role_id = r.id
      GROUP BY r.id ORDER BY r.is_superadmin DESC, r.name`,
   );
-  res.json(rows);
+  res.json(rows.map((r) => ({ ...r, privileged: r.is_superadmin || r.permissions.some((p) => HIGH_PRIVILEGE_PERMISSIONS.has(p)) })));
 }));
 
 const roleSchema = z.object({
@@ -38,9 +45,11 @@ async function setPermissions(db, roleId, perms) {
 }
 
 router.post('/', requirePerm('roles.manage'), ah(async (req, res) => {
+  await ownerOnly(req, 'création d\'un rôle');
   const data = parse(roleSchema, req.body);
   const code = data.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
   const role = await tx(async (db) => {
+    await setActor(db, req.user);
     const { rows: dup } = await db.query('SELECT 1 FROM roles WHERE code = $1 OR lower(name) = lower($2)', [code, data.name]);
     if (dup.length) throw conflict('Un rôle portant ce nom existe déjà.');
     const { rows: [r] } = await db.query(
@@ -56,9 +65,11 @@ router.post('/', requirePerm('roles.manage'), ah(async (req, res) => {
 }));
 
 router.put('/:id', requirePerm('roles.manage'), ah(async (req, res) => {
+  await ownerOnly(req, 'modification des permissions d\'un rôle');
   const id = Number(req.params.id);
   const data = parse(roleSchema, req.body);
   await tx(async (db) => {
+    await setActor(db, req.user);
     const { rows: [before] } = await db.query(
       `SELECT r.*, coalesce(array_agg(rp.permission_code ORDER BY rp.permission_code) FILTER (WHERE rp.permission_code IS NOT NULL), '{}') AS permissions
        FROM roles r LEFT JOIN role_permissions rp ON rp.role_id = r.id WHERE r.id = $1 GROUP BY r.id`, [id]);
@@ -87,8 +98,10 @@ router.put('/:id', requirePerm('roles.manage'), ah(async (req, res) => {
 }));
 
 router.delete('/:id', requirePerm('roles.manage'), ah(async (req, res) => {
+  await ownerOnly(req, 'suppression d\'un rôle');
   const id = Number(req.params.id);
   await tx(async (db) => {
+    await setActor(db, req.user);
     const { rows: [r] } = await db.query('SELECT * FROM roles WHERE id = $1', [id]);
     if (!r) throw notFound('Rôle introuvable');
     if (r.is_system) throw badRequest('Les rôles système ne peuvent pas être supprimés.');

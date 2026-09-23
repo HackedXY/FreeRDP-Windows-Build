@@ -11,6 +11,7 @@ import { nextNumber } from '../lib/numbering.js';
 import { PERMISSION_CODES } from '../lib/permissions.js';
 import { disconnectUser } from '../lib/realtime.js';
 import { checkPasswordPolicy, BCRYPT_ROUNDS } from './auth.js';
+import { setActor, roleInfo, isPrivilegedRole, targetProfile, denyEscalation } from '../lib/privilege.js';
 
 const router = Router();
 
@@ -74,13 +75,36 @@ router.get('/:id', requirePerm('users.view', 'users.manage'), ah(async (req, res
   res.json(await getUser({ query }, Number(req.params.id)));
 }));
 
+/**
+ * Règles d'administration des comptes (le propriétaire = super-administrateur) :
+ *  - seul le propriétaire accorde/retire des permissions individuelles ;
+ *  - seul le propriétaire attribue un rôle privilégié (administrateur ou
+ *    contenant une permission à haut privilège) ;
+ *  - seul le propriétaire gère un compte privilégié, ou un compte disposant de
+ *    permissions que le gestionnaire ne possède pas lui-même ;
+ *  - personne ne modifie son propre rôle, ses propres permissions ni son statut.
+ */
+async function assertCanManageTarget(req, target, what) {
+  if (req.user.superadmin) return;
+  if (target.privileged) await denyEscalation(req, `${what} d'un compte privilégié`, { entityId: target.id });
+  const missing = [...target.perms].filter((p) => !req.user.permissions.has(p));
+  if (missing.length) await denyEscalation(req, `${what} d'un compte disposant de droits que vous n'avez pas`, { entityId: target.id, attempt: { missing } });
+}
+
 router.post('/', requirePerm('users.manage'), ah(async (req, res) => {
   const data = parse(userSchema, req.body);
+  if (!req.user.superadmin) {
+    const role = await roleInfo({ query }, data.role_id);
+    if (role && isPrivilegedRole(role)) await denyEscalation(req, `création d'un compte avec le rôle privilégié « ${role.name} »`, { attempt: { role: role.code } });
+    if (role && role.permissions.some((p) => !req.user.permissions.has(p))) await denyEscalation(req, `création d'un compte avec des droits que vous n'avez pas (rôle « ${role.name} »)`, { attempt: { role: role.code } });
+    if (data.permission_overrides?.length) await denyEscalation(req, 'attribution de permissions individuelles', { attempt: { permission_overrides: data.permission_overrides } });
+  }
   const password = data.password || temporaryPassword();
   const policy = checkPasswordPolicy(password, data.username);
   if (policy) throw badRequest(policy);
   const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   const user = await tx(async (db) => {
+    await setActor(db, req.user);
     const { rows: dup } = await db.query('SELECT 1 FROM users WHERE lower(username) = lower($1)', [data.username]);
     if (dup.length) throw conflict('Cet identifiant est déjà utilisé.');
     const { rows: [role] } = await db.query('SELECT id, name FROM roles WHERE id = $1', [data.role_id]);
@@ -107,14 +131,30 @@ router.post('/', requirePerm('users.manage'), ah(async (req, res) => {
 router.put('/:id', requirePerm('users.manage'), ah(async (req, res) => {
   const id = Number(req.params.id);
   const data = parse(userSchema.omit({ password: true }).partial(), req.body);
+  const current = await getUser({ query }, id);
+  const norm = (l) => JSON.stringify([...l].map((o) => `${o.permission_code}:${o.granted}`).sort());
+  const overridesChange = data.permission_overrides !== undefined && norm(current.permission_overrides) !== norm(data.permission_overrides);
+  const roleChange = data.role_id !== undefined && data.role_id !== current.role_id;
+  const statusChange = data.status !== undefined && data.status !== current.status;
+  if (id === req.user.id && (roleChange || overridesChange || statusChange)) {
+    await denyEscalation(req, 'modification de son propre rôle, de ses propres permissions ou de son statut', { entityId: id, attempt: { role_id: data.role_id, permission_overrides: data.permission_overrides, status: data.status } });
+  }
+  if (!req.user.superadmin) {
+    if (id !== req.user.id) await assertCanManageTarget(req, await targetProfile({ query }, id), 'modification');
+    if (overridesChange) await denyEscalation(req, 'attribution de permissions individuelles', { entityId: id, attempt: { permission_overrides: data.permission_overrides } });
+    if (roleChange) {
+      const role = await roleInfo({ query }, data.role_id);
+      if (role && (isPrivilegedRole(role) || role.permissions.some((p) => !req.user.permissions.has(p)))) {
+        await denyEscalation(req, `attribution du rôle « ${role.name} »`, { entityId: id, attempt: { role: role.code } });
+      }
+    }
+  }
   const user = await tx(async (db) => {
+    await setActor(db, req.user);
     const before = await getUser(db, id);
     if (data.username && data.username.toLowerCase() !== before.username.toLowerCase()) {
       const { rows: dup } = await db.query('SELECT 1 FROM users WHERE lower(username) = lower($1) AND id <> $2', [data.username, id]);
       if (dup.length) throw conflict('Cet identifiant est déjà utilisé.');
-    }
-    if (id === req.user.id && (data.status === 'disabled' || (data.role_id && data.role_id !== before.role_id))) {
-      throw badRequest('Vous ne pouvez pas désactiver votre propre compte ni changer votre propre rôle.');
     }
     const fields = ['first_name', 'last_name', 'phone', 'email', 'job_title', 'role_id', 'username', 'status'];
     const sets = []; const vals = [];
@@ -124,12 +164,8 @@ router.put('/:id', requirePerm('users.manage'), ah(async (req, res) => {
       await db.query(`UPDATE users SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals);
     }
     const changes = diff(before, data, fields);
-    let permChanged = false;
-    if (data.permission_overrides) {
-      const norm = (l) => JSON.stringify([...l].map((o) => `${o.permission_code}:${o.granted}`).sort());
-      permChanged = norm(before.permission_overrides) !== norm(data.permission_overrides);
-      if (permChanged) await saveOverrides(db, id, data.permission_overrides);
-    }
+    const permChanged = overridesChange;
+    if (permChanged) await saveOverrides(db, id, data.permission_overrides);
     if (changes || permChanged) {
       const roleChanged = changes?.newValue.role_id !== undefined;
       await audit(db, req.ctx, {
@@ -162,9 +198,13 @@ router.put('/:id', requirePerm('users.manage'), ah(async (req, res) => {
 
 router.post('/:id/reset-password', requirePerm('users.manage'), ah(async (req, res) => {
   const id = Number(req.params.id);
+  const target = await targetProfile({ query }, id);
+  if (!target) throw notFound('Employé introuvable');
+  await assertCanManageTarget(req, target, 'réinitialisation du mot de passe');
   const password = temporaryPassword();
   const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   await tx(async (db) => {
+    await setActor(db, req.user);
     const before = await getUser(db, id);
     await db.query(
       'UPDATE users SET password_hash = $1, must_change_password = TRUE, failed_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = $2',
@@ -182,7 +222,11 @@ router.post('/:id/reset-password', requirePerm('users.manage'), ah(async (req, r
 
 router.post('/:id/unlock', requirePerm('users.manage'), ah(async (req, res) => {
   const id = Number(req.params.id);
+  const target = await targetProfile({ query }, id);
+  if (!target) throw notFound('Employé introuvable');
+  await assertCanManageTarget(req, target, 'déverrouillage');
   await tx(async (db) => {
+    await setActor(db, req.user);
     const u = await getUser(db, id);
     await db.query('UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1', [id]);
     await audit(db, req.ctx, { action: 'user.unlock', entityType: 'user', entityId: id, summary: `Déverrouillage du compte de ${u.first_name} ${u.last_name}` });

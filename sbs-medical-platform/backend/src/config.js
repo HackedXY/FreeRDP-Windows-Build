@@ -14,6 +14,8 @@ export const config = {
   isProd,
   port: Number(env.PORT || 4000),
   databaseUrl: required('DATABASE_URL', 'postgres://sbs:sbs@localhost:5432/sbs'),
+  // Identifiants propriétaire (migrations). Absents du conteneur applicatif en production.
+  migrationDatabaseUrl: env.MIGRATION_DATABASE_URL || null,
   // Clé 32 octets (base64) pour le chiffrement AES-256-GCM des données médicales
   dataKey: Buffer.from(
     required('DATA_ENCRYPTION_KEY', crypto.createHash('sha256').update('sbs-dev-only-key').digest('base64')),

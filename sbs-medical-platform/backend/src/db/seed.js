@@ -1,8 +1,8 @@
 import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';
-import { pool, tx } from './pool.js';
+import { ownerPool, ownerTx } from './pool.js';
 import { config } from '../config.js';
-import { PERMISSIONS, DEFAULT_ROLES } from '../lib/permissions.js';
+import { PERMISSIONS, DEFAULT_ROLES, HIGH_PRIVILEGE_PERMISSIONS } from '../lib/permissions.js';
 import { temporaryPassword } from '../lib/crypto.js';
 
 const DEFAULT_ACTS = [
@@ -29,13 +29,16 @@ const DEFAULT_EXAMS = [
 ];
 
 export async function seed({ log = console.log } = {}) {
-  await tx(async (db) => {
+  await ownerTx(async (db) => {
+    // Contexte d'initialisation : honoré uniquement pour le rôle propriétaire du schéma
+    await db.query(`SELECT set_config('sbs.context', 'system', true)`);
     let i = 0;
     for (const [code, module, label] of PERMISSIONS) {
       await db.query(
-        `INSERT INTO permissions (code, module, label, sort_order) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (code) DO UPDATE SET module = EXCLUDED.module, label = EXCLUDED.label, sort_order = EXCLUDED.sort_order`,
-        [code, module, label, i++]);
+        `INSERT INTO permissions (code, module, label, sort_order, high_privilege) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (code) DO UPDATE SET module = EXCLUDED.module, label = EXCLUDED.label, sort_order = EXCLUDED.sort_order,
+           high_privilege = EXCLUDED.high_privilege`,
+        [code, module, label, i++, HIGH_PRIVILEGE_PERMISSIONS.has(code)]);
     }
     for (const r of DEFAULT_ROLES) {
       const { rows: [role] } = await db.query(
@@ -84,5 +87,5 @@ export async function seed({ log = console.log } = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { migrate } = await import('./migrate.js');
-  migrate().then(() => seed()).then(() => pool.end()).catch((e) => { console.error(e); process.exit(1); });
+  migrate().then(() => seed()).then(() => ownerPool.end()).catch((e) => { console.error(e); process.exit(1); });
 }

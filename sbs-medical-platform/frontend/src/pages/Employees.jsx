@@ -41,7 +41,13 @@ function OverridesEditor({ role, value, onChange }) {
 }
 
 function EmployeeForm({ employee, onClose, onSaved }) {
-  const { data: roles } = useFetch('/roles');
+  const { user: me } = useAuth();
+  const { data: allRoles } = useFetch('/roles');
+  // Seul le propriétaire attribue des rôles privilégiés ; les autres gestionnaires ne
+  // peuvent déléguer que des droits qu'ils détiennent (règle appliquée aussi par l'API).
+  const roles = allRoles?.filter((r) => me.superadmin || String(r.id) === String(employee?.role_id)
+    || (!r.privileged && r.permissions.every((p) => me.permissions.includes(p))));
+  const isSelf = employee?.id === me.id;
   const { values, bind, set } = useForm(employee
     ? { ...employee, role_id: String(employee.role_id), permission_overrides: employee.permission_overrides || [] }
     : { status: 'active', permission_overrides: [], role_id: '' });
@@ -66,12 +72,12 @@ function EmployeeForm({ employee, onClose, onSaved }) {
           <Field label="Téléphone"><input type="tel" {...bind('phone')} /></Field>
           <Field label="E-mail"><input type="email" {...bind('email')} /></Field>
           <Field label="Fonction"><input {...bind('job_title')} placeholder="Médecin généraliste, caissière…" /></Field>
-          <Field label="Rôle" required><select {...bind('role_id')} required><option value="">—</option>{roles?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>
+          <Field label="Rôle" required><select {...bind('role_id')} required disabled={isSelf}><option value="">—</option>{roles?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>
           <Field label="Identifiant de connexion" required><input {...bind('username')} required autoComplete="off" pattern="[a-zA-Z0-9._\-]{3,50}" /></Field>
           {!employee && <Field label="Mot de passe temporaire" hint="Laisser vide pour en générer un automatiquement."><input {...bind('password')} autoComplete="new-password" /></Field>}
-          <Field label="Statut"><select {...bind('status')}><option value="active">Actif</option><option value="disabled">Désactivé</option></select></Field>
+          <Field label="Statut"><select {...bind('status')} disabled={isSelf}><option value="active">Actif</option><option value="disabled">Désactivé</option></select></Field>
         </div>
-        {role && (
+        {role && me.superadmin && !isSelf && (
           <div>
             <button type="button" className="btn ghost sm" onClick={() => setShowPerms(!showPerms)}>{showPerms ? '▾' : '▸'} Permissions individuelles ({values.permission_overrides.length} ajustement(s))</button>
             {showPerms && <div style={{ marginTop: 8 }}><OverridesEditor role={role} value={values.permission_overrides} onChange={(v) => set('permission_overrides', v)} /></div>}
@@ -129,6 +135,7 @@ export function EmployeeDetail() {
   const { can, user: me } = useAuth();
   const toast = useToast();
   const { data: u, reload, error } = useFetch(`/users/${id}`);
+  const { data: roles } = useFetch('/roles');
   const [tab, setTab] = useState('activity');
   const { data: activity } = useFetch(tab === 'activity' ? `/users/${id}/activity` : null);
   const { data: logins } = useFetch(tab === 'logins' ? `/users/${id}/logins` : null);
@@ -137,6 +144,9 @@ export function EmployeeDetail() {
   if (error) return <ErrorBox error={error} />;
   if (!u) return <Empty>Chargement…</Empty>;
   const locked = u.locked_until && new Date(u.locked_until) > new Date();
+  const targetRole = roles?.find((r) => r.id === u.role_id);
+  // Un compte privilégié n'est gérable que par le propriétaire
+  const manageable = can('users.manage') && (me.superadmin || (targetRole && !targetRole.privileged && !u.permission_overrides.some((o) => o.granted)));
   const setStatus = async (status) => { try { await api.put(`/users/${id}`, { status }); toast(status === 'active' ? 'Compte réactivé' : 'Compte désactivé — sessions fermées'); reload(); } catch (e) { toast(e.message, 'danger'); } };
   return (
     <>
@@ -144,14 +154,15 @@ export function EmployeeDetail() {
         {u.status === 'active' ? <Badge tone="ok">Actif</Badge> : <Badge tone="muted">Désactivé</Badge>}
         {locked && <Badge tone="warn">Verrouillé</Badge>}
         {can('reports.employee') && <Link className="btn" to={`/rapports/employe/${u.id}`}>📈 Rapport</Link>}
-        {can('users.manage') && <>
-          <button className="btn" onClick={() => setModal('edit')}>✏️ Modifier / permissions</button>
-          <button className="btn" onClick={async () => { const r = await api.post(`/users/${id}/reset-password`); setModal({ temp: r.temporaryPassword }); }}>🔑 Réinitialiser le mot de passe</button>
+        {manageable && <>
+          <button className="btn" onClick={() => setModal('edit')}>✏️ Modifier{me.superadmin ? ' / permissions' : ''}</button>
+          {u.id !== me.id && <button className="btn" onClick={async () => { try { const r = await api.post(`/users/${id}/reset-password`); setModal({ temp: r.temporaryPassword }); } catch (e) { toast(e.message, 'danger'); } }}>🔑 Réinitialiser le mot de passe</button>}
           {locked && <button className="btn" onClick={async () => { await api.post(`/users/${id}/unlock`); toast('Compte déverrouillé'); reload(); }}>🔓 Déverrouiller</button>}
           {u.id !== me.id && (u.status === 'active'
             ? <button className="btn danger" onClick={() => setStatus('disabled')}>Désactiver</button>
             : <button className="btn primary" onClick={() => setStatus('active')}>Réactiver</button>)}
         </>}
+        {can('users.manage') && !manageable && <span className="muted small">🔒 Compte privilégié : gestion réservée au propriétaire</span>}
       </PageHeader>
       <Card>
         <dl className="kv">

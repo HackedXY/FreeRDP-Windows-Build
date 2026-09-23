@@ -160,6 +160,7 @@ router.post('/change-password', requireAuth, ah(async (req, res) => {
   if (await bcrypt.compare(newPassword, row.password_hash)) throw badRequest('Le nouveau mot de passe doit être différent de l\'ancien.');
   const hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
   await tx(async (db) => {
+    await db.query(`SELECT set_config('sbs.actor_id', $1, true)`, [String(req.user.id)]);
     await db.query('UPDATE users SET password_hash = $1, must_change_password = FALSE, updated_at = now() WHERE id = $2', [hash, req.user.id]);
     await db.query('UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL', [req.user.id, req.user.sessionId]);
     await audit(db, req.ctx, { action: 'auth.password_changed', entityType: 'user', entityId: req.user.id, summary: `${req.user.fullName} a changé son mot de passe`, feed: false });
