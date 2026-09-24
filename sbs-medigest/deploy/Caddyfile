@@ -1,0 +1,31 @@
+# Reverse proxy HTTPS : certificat Let's Encrypt obtenu et renouvelé automatiquement.
+# Seul service exposé à Internet (ports 80/443) ; l'API et PostgreSQL restent sur le réseau Docker interne.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(self), geolocation=(), microphone=()"
+		-Server
+	}
+
+	# Justificatifs limités à 8 Mo côté API ; marge pour l'encodage multipart
+	request_body {
+		max_size 10MB
+	}
+
+	# WebSocket (temps réel) pris en charge nativement ; en-tête Host d'origine conservé
+	reverse_proxy app:4000
+
+	# Journal d'accès JSON (cookies et en-têtes d'autorisation masqués par défaut)
+	log {
+		output stdout
+		format json
+	}
+}

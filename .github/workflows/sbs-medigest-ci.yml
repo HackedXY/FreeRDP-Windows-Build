@@ -1,0 +1,111 @@
+# Intégration continue de SBS MediGest (dossier sbs-medigest/).
+# Bloquant : tests backend et frontend, build, audit des dépendances (niveau élevé, production),
+# détection de secrets, contrôle des espaces (git diff --check).
+name: SBS MediGest CI
+
+on:
+  push:
+    paths: ['sbs-medigest/**', '.github/workflows/sbs-medigest-ci.yml']
+  pull_request:
+    paths: ['sbs-medigest/**', '.github/workflows/sbs-medigest-ci.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbs-medigest-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: sbs-medigest
+
+jobs:
+  backend:
+    name: Tests backend (PostgreSQL 16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: ci-postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sbs-medigest/backend/package-lock.json
+      - name: Outils de sauvegarde (pg_dump / pg_restore 16)
+        run: sudo apt-get update -q && sudo apt-get install -yq postgresql-client-16
+      - name: Rôles et base de test (mêmes rôles que la production, identifiants de test)
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE sbs LOGIN PASSWORD 'sbs' CREATEDB;
+          CREATE ROLE sbs_app LOGIN PASSWORD 'sbs_app';
+          CREATE ROLE sbs_backup LOGIN PASSWORD 'sbs_backup';
+          CREATE DATABASE sbs_test OWNER sbs;
+          GRANT CONNECT ON DATABASE sbs_test TO sbs_app, sbs_backup;
+          SQL
+          psql -d sbs_test -c 'ALTER SCHEMA public OWNER TO sbs'
+      - run: npm ci
+        working-directory: sbs-medigest/backend
+      - run: npm test
+        working-directory: sbs-medigest/backend
+
+  frontend:
+    name: Tests et build frontend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sbs-medigest/frontend/package-lock.json
+      - run: npm ci
+        working-directory: sbs-medigest/frontend
+      - run: npm test
+        working-directory: sbs-medigest/frontend
+      - run: npm run build
+        working-directory: sbs-medigest/frontend
+
+  securite:
+    name: Audit des dépendances, secrets, espaces
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm audit — dépendances de production (bloquant à partir de « high »)
+        run: |
+          (cd backend && npm audit --omit=dev --audit-level=high)
+          (cd frontend && npm audit --omit=dev --audit-level=high)
+      - name: npm audit — outillage de développement (informatif)
+        continue-on-error: true
+        run: (cd frontend && npm audit --audit-level=high)
+      - name: Détection de secrets
+        run: ./deploy/scripts/check-secrets.sh
+      - name: git diff --check (espaces en fin de ligne, conflits non résolus)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          elif [ -n "${{ github.event.before }}" ] && ! echo "${{ github.event.before }}" | grep -qE '^0+$'; then
+            BASE="${{ github.event.before }}"
+          else
+            BASE="$(git rev-parse HEAD~1 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+          git diff --check "$BASE" HEAD -- .

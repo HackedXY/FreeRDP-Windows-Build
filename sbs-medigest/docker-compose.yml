@@ -1,0 +1,129 @@
+# Déploiement de production : docker compose up -d
+# Prérequis : fichier .env (voir .env.example) et un nom de domaine pointant vers le serveur.
+# Nom de projet fixe : volumes (pgdata, uploads…) indépendants du nom du dossier
+name: sbs-medigest
+
+# Journaux Docker bornés (évite de remplir le disque)
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Aucun processus ne peut acquérir de privilèges supplémentaires (setuid…)
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  db:
+    logging: *logging
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sbs
+      POSTGRES_USER: postgres                                   # super-utilisateur : provisionnement uniquement
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD requis}
+      OWNER_DB_PASSWORD: ${OWNER_DB_PASSWORD:?OWNER_DB_PASSWORD requis}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD requis}
+      BACKUP_DB_PASSWORD: ${BACKUP_DB_PASSWORD:?BACKUP_DB_PASSWORD requis}
+      TZ: Africa/Conakry
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+
+  # Migrations + initialisation : seul service à détenir les identifiants propriétaire.
+  # S'exécute puis s'arrête (docker compose run --rm migrate pour une mise à jour).
+  # Séparation des secrets : il ne reçoit NI la clé de chiffrement médical NI la clé HMAC
+  # du journal d'audit (propriétaire de la base + clé HMAC = réécriture indétectable).
+  # Seule exception documentée : récupération du compte propriétaire (-e AUDIT_HMAC_KEY),
+  # voir docs/RECUPERATION-PROPRIETAIRE.md.
+  migrate:
+    logging: *logging
+    <<: *hardening
+    build: .
+    restart: "no"
+    depends_on:
+      db: { condition: service_healthy }
+    command: ["node", "src/db/seed.js"]
+    environment:
+      MIGRATION_DATABASE_URL: postgres://sbs:${OWNER_DB_PASSWORD}@db:5432/sbs
+      DATABASE_URL: postgres://sbs_app:${APP_DB_PASSWORD}@db:5432/sbs
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+  app:
+    logging: *logging
+    <<: *hardening
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    environment:
+      # Rôle restreint : pas de droits propriétaire (l'application refuse de démarrer sinon)
+      DATABASE_URL: postgres://sbs_app:${APP_DB_PASSWORD}@db:5432/sbs
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY requis}
+      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:?AUDIT_HMAC_KEY requis}
+      COOKIE_SECURE: "true"
+      OWNER_MFA_REQUIRED: "true"
+      BACKUP_MONITORING: "on"
+      # Déconnexion automatique après inactivité (minutes) ; durée maximale d'une session : 12 h
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
+    volumes:
+      - uploads:/data/uploads
+
+  # Reverse proxy HTTPS (certificat Let's Encrypt automatique)
+  caddy:
+    logging: *logging
+    <<: *hardening
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # attend que l'API réponde (HEALTHCHECK de l'image) ; redémarrage automatique après un reboot
+    depends_on:
+      app: { condition: service_healthy }
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN requis}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL requis}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Sauvegarde quotidienne HORS SERVEUR : dump chiffré avec la clé PUBLIQUE (le serveur ne peut
+  # pas relire les sauvegardes), envoi via rclone (S3/Backblaze/SFTP…), rétention, journal dans
+  # backup_runs. L'application alerte (haute) en cas d'échec ou d'absence de sauvegarde > 26 h.
+  backup:
+    logging: *logging
+    <<: *hardening
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    command: ["node", "src/backup/worker.js"]
+    environment:
+      NODE_ENV: production
+      BACKUP_DATABASE_URL: postgres://sbs_backup:${BACKUP_DB_PASSWORD}@db:5432/sbs   # lecture seule
+      BACKUP_TARGET: ${BACKUP_TARGET:?BACKUP_TARGET requis (ex. rclone:distant:sbs-sauvegardes)}
+      BACKUP_PUBLIC_KEY_FILE: /run/secrets/backup-public.pem
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      # off (recommandé) : le serveur ne supprime rien ; rétention par le stockage (docs/SAUVEGARDES.md)
+      BACKUP_REMOTE_PRUNE: ${BACKUP_REMOTE_PRUNE:-off}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+      UPLOAD_DIR: /data/uploads
+      TZ: Africa/Conakry
+    env_file:
+      - path: ./secrets/rclone.env        # RCLONE_CONFIG_DISTANT_* (identifiants du stockage distant)
+        required: true
+    volumes:
+      - uploads:/data/uploads:ro
+      - ./secrets/backup-public.pem:/run/secrets/backup-public.pem:ro
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:
