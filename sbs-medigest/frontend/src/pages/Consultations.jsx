@@ -8,6 +8,66 @@ import {
 } from '../components/ui.jsx';
 import { dateTime, gnf, age, localInput } from '../format.js';
 import { LabRequestModal } from './Lab.jsx';
+import { LABELS } from '../format.js';
+
+const CERT_TEMPLATES = {
+  repos: 'Son état de santé nécessite un repos médical.',
+  aptitude: 'Ne présente, à ce jour, aucune contre-indication cliniquement décelable à la pratique de l\'activité suivante : ',
+  inaptitude: 'Présente, à ce jour, une contre-indication temporaire à : ',
+  presence: 'S\'est présenté(e) ce jour en consultation au cabinet.',
+  autre: '',
+};
+
+/** Certificats médicaux d'un patient (liste sans contenu, création, PDF, annulation par le signataire). */
+export function CertificatesCard({ patientId, consultationId, editable = true }) {
+  const { can } = useAuth();
+  const toast = useToast();
+  const { data, reload } = useFetch('/documents/certificates', { patient_id: patientId });
+  const [open, setOpen] = useState(false);
+  const [cancel, setCancel] = useState(null);
+  const [f, setF] = useState({ cert_type: 'repos', body: CERT_TEMPLATES.repos, rest_days: '', start_date: '', end_date: '' });
+  const [error, setError] = useState(null);
+  const submit = async (e) => {
+    e.preventDefault(); setError(null);
+    try {
+      await api.post('/documents/certificates', { ...f, patient_id: patientId, consultation_id: consultationId || null, rest_days: f.rest_days ? Number(f.rest_days) : null });
+      toast('Certificat établi'); setOpen(false); reload();
+    } catch (err) { setError(err); }
+  };
+  return (
+    <Card title="Certificats médicaux" actions={editable && can('certificates.create') && <button className="btn sm" onClick={() => setOpen(true)}>+ Certificat</button>}>
+      {!data?.length ? <Empty>Aucun certificat</Empty> : data.map((ct) => (
+        <div key={ct.id} className="row">
+          <b className="small">{ct.number}</b><span className="small">{LABELS.cert_type[ct.cert_type]}</span>
+          <span className="grow small muted">{dateTime(ct.issued_at)} · Dr {ct.doctor_name}</span>
+          {ct.cancelled_at ? <Badge tone="muted">Annulé</Badge> : (
+            can('certificates.create') && <button className="btn ghost sm" onClick={() => setCancel(ct)}>Annuler</button>
+          )}
+          <a className="btn ghost sm" href={`/api/documents/certificates/${ct.id}/pdf`} target="_blank" rel="noreferrer">🖨 PDF</a>
+        </div>
+      ))}
+      {open && (
+        <Modal title="Nouveau certificat médical" onClose={() => setOpen(false)}>
+          <form className="form" onSubmit={submit}>
+            <Field label="Type" required><select value={f.cert_type} onChange={(e) => setF({ ...f, cert_type: e.target.value, body: CERT_TEMPLATES[e.target.value] })}>{Object.entries(LABELS.cert_type).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
+            <Field label="Texte du certificat" required><textarea rows={4} value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })} required minLength={5} /></Field>
+            {f.cert_type === 'repos' && (
+              <div className="form-grid">
+                <Field label="Durée du repos (jours)" required><input type="number" min="1" max="365" value={f.rest_days} onChange={(e) => setF({ ...f, rest_days: e.target.value })} required /></Field>
+                <Field label="À partir du"><input type="date" value={f.start_date} onChange={(e) => setF({ ...f, start_date: e.target.value })} /></Field>
+                <Field label="Jusqu'au (inclus)"><input type="date" value={f.end_date} onChange={(e) => setF({ ...f, end_date: e.target.value })} /></Field>
+              </div>
+            )}
+            <p className="hint">Le contenu est chiffré ; le certificat est signé à votre nom et numéroté.</p>
+            <ErrorBox error={error} />
+            <div className="form-actions"><button type="button" className="btn ghost" onClick={() => setOpen(false)}>Annuler</button><button className="btn primary">Établir le certificat</button></div>
+          </form>
+        </Modal>
+      )}
+      {cancel && <ReasonModal title={`Annuler le certificat ${cancel.number}`} danger onClose={() => setCancel(null)} onConfirm={async (reason) => { await api.post(`/documents/certificates/${cancel.id}/cancel`, { reason }); reload(); }}><p className="muted">Seul le médecin signataire peut annuler un certificat. Le document reste archivé avec la mention « annulé ».</p></ReasonModal>}
+    </Card>
+  );
+}
 
 export function useDoctors() {
   const { data } = useFetch('/users/directory/doctors');
@@ -154,6 +214,7 @@ function PrescriptionModal({ consultation, onClose, onSaved }) {
             <Field label="Posologie"><input value={it.frequency} onChange={(e) => upd(i, 'frequency', e.target.value)} placeholder="2 fois / jour" /></Field>
             <Field label="Durée"><input value={it.duration} onChange={(e) => upd(i, 'duration', e.target.value)} placeholder="5 jours" /></Field>
             <Field label="Quantité"><input type="number" min="0" value={it.quantity} onChange={(e) => upd(i, 'quantity', e.target.value)} /></Field>
+            <Field label="Instructions" className="span-2"><input value={it.instructions || ''} onChange={(e) => upd(i, 'instructions', e.target.value)} placeholder="Pendant les repas…" /></Field>
           </div>
         ))}
         <button type="button" className="btn ghost" onClick={() => setItems([...items, { drug_name: '', dosage: '', frequency: '', duration: '', quantity: '' }])}>+ Ajouter une ligne</button>
@@ -240,13 +301,20 @@ export function ConsultationDetail() {
           {c.prescriptions && (
             <Card title="Prescriptions" actions={editable && can('prescriptions.create') && <button className="btn sm" onClick={() => setModal('rx')}>+ Prescrire</button>}>
               {!c.prescriptions.length ? <Empty>Aucune prescription</Empty> : c.prescriptions.map((pr) => (
-                <ul key={pr.id} style={{ margin: 0, paddingLeft: 18 }}>
-                  {pr.items.map((it) => <li key={it.id}><b>{it.drug_name}</b> {it.dosage} {it.frequency && `· ${it.frequency}`} {it.duration && `· ${it.duration}`} {it.quantity ? `· qté ${it.quantity}` : ''}</li>)}
-                  {pr.notes && <li className="muted">{pr.notes}</li>}
-                </ul>
+                <div key={pr.id} style={{ marginBottom: 10 }}>
+                  <div className="row">
+                    <b className="small">{pr.number}</b><Badge value={pr.status} map="prescription_status" /><span className="grow" />
+                    <a className="btn ghost sm" href={`/api/consultations/prescriptions/${pr.id}/pdf`} target="_blank" rel="noreferrer">🖨 Ordonnance PDF</a>
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {pr.items.map((it) => <li key={it.id}><b>{it.drug_name}</b> {it.dosage} {it.frequency && `· ${it.frequency}`} {it.duration && `· ${it.duration}`} {it.quantity ? `· qté ${it.quantity}` : ''}{it.instructions ? ` · ${it.instructions}` : ''}</li>)}
+                    {pr.notes && <li className="muted">{pr.notes}</li>}
+                  </ul>
+                </div>
               ))}
             </Card>
           )}
+          {can('certificates.create', 'patients.view_medical') && <CertificatesCard patientId={c.patient_id} consultationId={c.id} editable={editable} />}
           {c.lab_requests && (
             <Card title="Examens demandés" actions={editable && can('lab.request') && <button className="btn sm" onClick={() => setModal('lab')}>+ Demander</button>}>
               {!c.lab_requests.length ? <Empty>Aucun examen</Empty> : c.lab_requests.map((l) => (

@@ -4,6 +4,10 @@ import { ah } from '../lib/errors.js';
 import { requirePerm, can } from '../lib/auth.js';
 import { onlineUserIds } from '../lib/presence.js';
 import { sessionTotals } from './cash.js';
+import { DAILY_SERIES_SQL } from '../lib/helpers.js';
+
+/** Date locale (AAAA-MM-JJ) décalée de n jours. */
+const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 const router = Router();
 
@@ -36,14 +40,11 @@ router.get('/', requirePerm('dashboard.view', 'dashboard.finance'), ah(async (re
     query(`SELECT s.id, s.number, s.opened_at, r.name AS register_name, u.first_name || ' ' || u.last_name AS opened_by_name
            FROM cash_sessions s JOIN cash_registers r ON r.id = s.register_id JOIN users u ON u.id = s.opened_by WHERE s.status = 'ouverte'`),
     query(`SELECT number, closed_at, declared_balance, discrepancy FROM cash_sessions WHERE status = 'cloturee' ORDER BY closed_at DESC LIMIT 1`),
-    query(`SELECT d::date AS day,
-             (SELECT coalesce(sum(amount), 0) FROM payments WHERE status = 'valide' AND created_at >= d AND created_at < d + interval '1 day') AS revenue,
-             (SELECT coalesce(sum(amount), 0) FROM expenses WHERE status = 'validee' AND expense_date = d::date) AS expenses,
-             (SELECT count(*)::int FROM consultations WHERE status <> 'annulee' AND consulted_at >= d AND consulted_at < d + interval '1 day') AS consultations
-           FROM generate_series(CURRENT_DATE - 6, CURRENT_DATE, interval '1 day') d ORDER BY d`),
+    query(DAILY_SERIES_SQL, [daysAgo(6), daysAgo(-1)]),
     query(`SELECT a.id, a.created_at AS at, a.action, a.summary, coalesce(u.first_name || ' ' || u.last_name, a.username, 'Système') AS user, r.name AS role
            FROM audit_log a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN roles r ON r.id = u.role_id
-           WHERE a.action NOT IN ('auth.login', 'auth.logout', 'auth.login_failed', 'access.denied', 'auth.password_changed')
+           WHERE a.action NOT IN ('auth.login', 'auth.logout', 'auth.login_failed', 'access.denied', 'auth.password_changed', 'medical.read', 'document.print', 'document.verify')
+             AND a.action NOT LIKE 'auth.mfa%'
            ORDER BY a.id DESC LIMIT 20`),
     query(`SELECT count(*) FILTER (WHERE status = 'active')::int AS active, count(*)::int AS total,
              count(*) FILTER (WHERE status = 'active' AND last_login_at >= CURRENT_DATE)::int AS logged_today FROM users`),

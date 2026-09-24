@@ -51,18 +51,29 @@ router.get('/reminders', requirePerm('appointments.view'), ah(async (req, res) =
   res.json(rows.map((a) => present(a, req.user)));
 }));
 
+const ACTIVE = ['planifie', 'confirme'];
+
+/**
+ * Refuse un chevauchement de créneau pour un même médecin (rendez-vous planifiés ou confirmés).
+ * Un verrou transactionnel par médecin empêche deux réservations concurrentes du même créneau.
+ */
+async function assertNoClash(db, { doctorId, scheduledAt, duration, excludeId = null }) {
+  if (!doctorId) return;
+  await db.query('SELECT pg_advisory_xact_lock(4711, $1)', [doctorId]);
+  const { rows: clash } = await db.query(
+    `SELECT 1 FROM appointments WHERE doctor_id = $1 AND status = ANY($4::text[]) AND ($5::int IS NULL OR id <> $5)
+       AND tstzrange(scheduled_at, scheduled_at + duration_minutes * interval '1 minute') &&
+           tstzrange($2::timestamptz, $2::timestamptz + $3 * interval '1 minute')`,
+    [doctorId, scheduledAt, duration, ACTIVE, excludeId]);
+  if (clash.length) throw badRequest('Ce médecin a déjà un rendez-vous sur ce créneau.');
+}
+
 router.post('/', requirePerm('appointments.manage'), ah(async (req, res) => {
   const d = parse(schema, req.body);
   const out = await tx(async (db) => {
     const { rows: [p] } = await db.query('SELECT patient_number FROM patients WHERE id = $1', [d.patient_id]);
     if (!p) throw badRequest('Patient introuvable');
-    if (d.doctor_id) {
-      const { rows: clash } = await db.query(
-        `SELECT 1 FROM appointments WHERE doctor_id = $1 AND status IN ('planifie','confirme')
-           AND tstzrange(scheduled_at, scheduled_at + duration_minutes * interval '1 minute') &&
-               tstzrange($2::timestamptz, $2::timestamptz + $3 * interval '1 minute')`, [d.doctor_id, d.scheduled_at, d.duration_minutes]);
-      if (clash.length) throw badRequest('Ce médecin a déjà un rendez-vous sur ce créneau.');
-    }
+    await assertNoClash(db, { doctorId: d.doctor_id, scheduledAt: d.scheduled_at, duration: d.duration_minutes });
     const { rows: [a] } = await db.query(
       `INSERT INTO appointments (site_id, patient_id, doctor_id, scheduled_at, duration_minutes, reason, notes, reminder_at, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -80,6 +91,18 @@ router.put('/:id', requirePerm('appointments.manage'), ah(async (req, res) => {
   const out = await tx(async (db) => {
     const { rows: [before] } = await db.query('SELECT * FROM appointments WHERE id = $1 FOR UPDATE', [id]);
     if (!before) throw notFound('Rendez-vous introuvable');
+    // Même contrôle de créneau qu'à la création, sur l'état résultant de la modification
+    const next = {
+      doctorId: d.doctor_id !== undefined ? d.doctor_id : before.doctor_id,
+      scheduledAt: d.scheduled_at ?? before.scheduled_at,
+      duration: d.duration_minutes ?? before.duration_minutes,
+      status: d.status ?? before.status,
+    };
+    const slotChanged = (d.doctor_id !== undefined && d.doctor_id !== before.doctor_id)
+      || (d.scheduled_at !== undefined && new Date(d.scheduled_at).getTime() !== new Date(before.scheduled_at).getTime())
+      || (d.duration_minutes !== undefined && d.duration_minutes !== before.duration_minutes)
+      || (ACTIVE.includes(next.status) && !ACTIVE.includes(before.status));
+    if (slotChanged && ACTIVE.includes(next.status)) await assertNoClash(db, { ...next, excludeId: id });
     const sets = []; const vals = [];
     for (const f of FIELDS) if (d[f] !== undefined) { vals.push(['reason', 'notes'].includes(f) ? encrypt(d[f] || null) : d[f]); sets.push(`${f} = $${vals.length}`); }
     if (d.scheduled_at) sets.push('reminder_sent_at = NULL');

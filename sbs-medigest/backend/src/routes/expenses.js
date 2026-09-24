@@ -61,8 +61,35 @@ router.get('/:id/attachment', requirePerm('expenses.view'), ah(async (req, res) 
   res.download(path.join(config.uploadDir, path.basename(e.attachment_path)), e.attachment_name || 'justificatif');
 }));
 
-async function disburse(db, req, e) {
-  const session = await requireOpenSession(db);
+/**
+ * Décaissement en espèces. Contrôles : caisse ouverte choisie, solde suffisant (jamais négatif),
+ * et plafond journalier des dépenses en espèces (toutes caisses) : au-delà, seul un utilisateur
+ * habilité à valider les dépenses peut décaisser, et une alerte est levée.
+ */
+async function disburse(db, req, e, registerId = null) {
+  const session = await requireOpenSession(db, registerId);
+  const { finance } = await getSettings();
+  const limit = finance.cash_expense_daily_limit;
+  if (limit) {
+    await db.query('SELECT pg_advisory_xact_lock(4712)'); // décaissements concurrents : plafond contrôlé une fois pour toutes
+    const { rows: [t] } = await db.query(
+      `SELECT coalesce(sum(amount), 0)::bigint AS total FROM cash_movements
+       WHERE category = 'depense' AND created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + 1`);
+    const after = Number(t.total) + e.amount;
+    if (after > limit) {
+      if (!can(req.user, 'expenses.validate')) {
+        const err = badRequest(`Plafond journalier des dépenses en espèces atteint (${fmtGNF(Number(t.total))} / ${fmtGNF(limit)}) : décaissement réservé au responsable.`);
+        err.code = 'CASH_EXPENSE_LIMIT';
+        throw err;
+      }
+      await raiseAlert(db, req.ctx, {
+        category: 'financiere', type: 'plafond_depenses_especes', severity: 'moyenne',
+        title: `Plafond journalier des dépenses en espèces dépassé : ${fmtGNF(after)} / ${fmtGNF(limit)}`,
+        details: { message: `Décaissement ${e.number} (${fmtGNF(e.amount)}) autorisé par ${req.user.fullName}` },
+        refType: 'expense', refId: e.id, userId: req.user.id, link: `/depenses?id=${e.id}`,
+      });
+    }
+  }
   await cashMovement(db, req, { sessionId: session.id, direction: 'out', category: 'depense', amount: e.amount, refType: 'expense', refId: e.id, note: e.reason });
   await db.query('UPDATE expenses SET disbursed = TRUE, disbursed_by = $2, disbursed_at = now(), cash_session_id = $3 WHERE id = $1', [e.id, req.user.id, session.id]);
   await audit(db, req.ctx, {
@@ -81,6 +108,7 @@ router.post('/', requirePerm('expenses.create'), upload.single('attachment'), ah
     supplier_id: z.coerce.number().int().positive().optional().nullable().or(z.literal('').transform(() => null)),
     expense_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('').transform(() => undefined)),
     pay_from_cash: z.union([z.boolean(), z.enum(['true', 'false']).transform((v) => v === 'true')]).optional(),
+    register_id: z.coerce.number().int().positive().optional().nullable().or(z.literal('').transform(() => null)),
   }), req.body);
   const settings = await getSettings();
   const requiresValidation = d.amount >= settings.finance.expense_validation_threshold && !can(req.user, 'expenses.validate');
@@ -120,7 +148,7 @@ router.post('/', requirePerm('expenses.create'), upload.single('attachment'), ah
     }
     if (status === 'validee' && d.pay_from_cash) {
       if (!can(req.user, 'expenses.disburse') && !can(req.user, 'cash.operate')) throw badRequest('Vous n\'êtes pas autorisé à décaisser.');
-      await disburse(db, req, e);
+      await disburse(db, req, e, d.register_id ?? null);
     }
     req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'expense' });
     return getExpense(db, e.id);
@@ -160,12 +188,13 @@ router.post('/:id/validate', requirePerm('expenses.validate'), ah(async (req, re
 
 router.post('/:id/disburse', requirePerm('expenses.disburse', 'cash.operate'), ah(async (req, res) => {
   const id = Number(req.params.id);
+  const { register_id: registerId } = parse(z.object({ register_id: z.coerce.number().int().positive().optional().nullable() }), req.body || {});
   const out = await tx(async (db) => {
     const { rows: [e] } = await db.query('SELECT * FROM expenses WHERE id = $1 FOR UPDATE', [id]);
     if (!e) throw notFound('Dépense introuvable');
     if (e.status !== 'validee') throw badRequest('Seule une dépense validée peut être décaissée.');
     if (e.disbursed) throw badRequest('Dépense déjà décaissée.');
-    await disburse(db, req, e);
+    await disburse(db, req, e, registerId ?? null);
     return getExpense(db, id);
   });
   res.json(out);

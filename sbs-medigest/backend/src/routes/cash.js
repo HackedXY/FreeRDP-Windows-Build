@@ -26,26 +26,88 @@ export async function sessionTotals(db, sessionId) {
   return { ...t, expected_balance: t.opening_balance + t.total_in - t.total_out };
 }
 
-/** Session ouverte à utiliser pour un mouvement d'espèces (lève une erreur sinon). */
+/**
+ * Session ouverte à utiliser pour un mouvement d'espèces (lève une erreur sinon).
+ * Sans caisse précisée, la session n'est choisie automatiquement que si UNE seule
+ * caisse est ouverte : avec plusieurs caisses ouvertes, le choix doit être explicite.
+ */
 export async function requireOpenSession(db, registerId = null) {
-  const { rows } = await db.query(
-    `SELECT s.* FROM cash_sessions s JOIN cash_registers r ON r.id = s.register_id
-     WHERE s.status = 'ouverte' AND ($1::int IS NULL OR s.register_id = $1) ORDER BY s.id LIMIT 1 FOR UPDATE OF s`,
-    [registerId]);
-  if (!rows[0]) throw badRequest('Aucune caisse ouverte : ouvrez la caisse avant toute opération en espèces.');
-  return rows[0];
+  const { rows: open } = await db.query(
+    `SELECT id FROM cash_sessions WHERE status = 'ouverte' AND ($1::int IS NULL OR register_id = $1) ORDER BY id`, [registerId]);
+  if (!open.length) {
+    throw badRequest(registerId ? 'Cette caisse n\'est pas ouverte.' : 'Aucune caisse ouverte : ouvrez la caisse avant toute opération en espèces.');
+  }
+  if (open.length > 1) throw registerRequired();
+  // verrou : une clôture concurrente attend la fin de l'opération (ou l'inverse)
+  const { rows: [s] } = await db.query(`SELECT * FROM cash_sessions WHERE id = $1 AND status = 'ouverte' FOR UPDATE`, [open[0].id]);
+  if (!s) throw conflict('La caisse vient d\'être clôturée : réessayez.');
+  return s;
+}
+
+/**
+ * Session de rattachement d'un encaissement hors espèces (suivi par caisse) :
+ * la caisse choisie, sinon l'unique caisse ouverte, sinon aucune.
+ */
+export async function sessionForNonCash(db, registerId = null) {
+  if (registerId) {
+    const { rows: [s] } = await db.query(
+      `SELECT * FROM cash_sessions WHERE register_id = $1 AND status = 'ouverte' FOR SHARE`, [registerId]);
+    if (!s) throw badRequest('Cette caisse n\'est pas ouverte.');
+    return s;
+  }
+  const { rows } = await db.query(`SELECT id FROM cash_sessions WHERE status = 'ouverte' ORDER BY id`);
+  if (rows.length !== 1) return null;
+  const { rows: [s] } = await db.query(`SELECT * FROM cash_sessions WHERE id = $1 AND status = 'ouverte' FOR SHARE`, [rows[0].id]);
+  return s || null;
+}
+
+/** Verrouille la session d'un élément existant et indique si elle est encore ouverte. */
+export async function lockSessionState(db, sessionId) {
+  if (!sessionId) return null;
+  const { rows: [s] } = await db.query('SELECT id, status FROM cash_sessions WHERE id = $1 FOR UPDATE', [sessionId]);
+  return s?.status || null;
+}
+
+function registerRequired() {
+  const e = badRequest('Plusieurs caisses sont ouvertes : choisissez la caisse concernée.');
+  e.code = 'REGISTER_REQUIRED';
+  return e;
 }
 
 export async function cashMovement(db, req, { sessionId, direction, category, amount, refType, refId, note }) {
   if (!amount) return;
+  // Solde jamais négatif (également garanti par la base) : message explicite pour l'utilisateur
+  if (direction === 'out') {
+    const t = await sessionTotals(db, sessionId);
+    if (t.expected_balance - amount < 0) {
+      const e = badRequest(`Solde de caisse insuffisant : ${fmtGNF(t.expected_balance)} disponibles pour une sortie de ${fmtGNF(amount)}.`);
+      e.code = 'INSUFFICIENT_CASH';
+      throw e;
+    }
+  }
   await db.query(
     `INSERT INTO cash_movements (cash_session_id, direction, category, amount, ref_type, ref_id, note, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [sessionId, direction, category, amount, refType, refId, note || null, req.user.id]);
 }
 
-router.get('/registers', ah(async (_req, res) => {
-  const { rows } = await query('SELECT * FROM cash_registers WHERE active ORDER BY id');
+router.get('/registers', ah(async (req, res) => {
+  const { rows } = await query(
+    `SELECT r.*, (SELECT s.carry_over FROM cash_sessions s WHERE s.register_id = r.id AND s.status = 'cloturee'
+                  ORDER BY s.closed_at DESC LIMIT 1) AS expected_opening
+     FROM cash_registers r WHERE r.active ORDER BY r.id`);
+  // le montant reporté est une donnée financière : réservé aux opérateurs de caisse
+  const money = can(req.user, 'cash.operate') || can(req.user, 'cash.view_all');
+  res.json(rows.map(({ expected_opening, ...r }) => (money ? { ...r, expected_opening } : r)));
+}));
+
+// Caisses ouvertes (sans montants) : sélection de la caisse lors d'un encaissement, d'une dépense ou d'un remboursement
+router.get('/open-registers', requirePerm('cash.operate', 'payments.create', 'payments.update', 'payments.refund', 'expenses.create', 'expenses.disburse', 'pharmacy.sell'), ah(async (_req, res) => {
+  const { rows } = await query(
+    `SELECT s.id AS session_id, s.number, s.register_id, r.name AS register_name, s.opened_at,
+       u.first_name || ' ' || u.last_name AS opened_by_name
+     FROM cash_sessions s JOIN cash_registers r ON r.id = s.register_id JOIN users u ON u.id = s.opened_by
+     WHERE s.status = 'ouverte' ORDER BY r.name, s.id`);
   res.json(rows);
 }));
 
@@ -63,6 +125,7 @@ router.post('/open', requirePerm('cash.operate'), ah(async (req, res) => {
   const d = parse(z.object({
     register_id: z.coerce.number().int().positive().optional(),
     opening_balance: z.coerce.number().int().min(0),
+    justification: z.string().trim().max(2000).optional().nullable(),
   }), req.body);
   const session = await tx(async (db) => {
     const { rows: [reg] } = await db.query(
@@ -70,19 +133,37 @@ router.post('/open', requirePerm('cash.operate'), ah(async (req, res) => {
     if (!reg) throw badRequest('Caisse introuvable');
     const { rows: open } = await db.query(`SELECT id FROM cash_sessions WHERE register_id = $1 AND status = 'ouverte'`, [reg.id]);
     if (open.length) throw conflict('Cette caisse est déjà ouverte.');
-    // Contrôle : le solde d'ouverture est comparé au solde déclaré à la dernière clôture
+    // Report : le solde d'ouverture doit correspondre à l'argent laissé dans la caisse à la dernière clôture
     const { rows: [last] } = await db.query(
-      `SELECT declared_balance FROM cash_sessions WHERE register_id = $1 AND status = 'cloturee' ORDER BY closed_at DESC LIMIT 1`, [reg.id]);
+      `SELECT id, number, declared_balance, carry_over FROM cash_sessions WHERE register_id = $1 AND status = 'cloturee'
+       ORDER BY closed_at DESC LIMIT 1`, [reg.id]);
+    const expected = last ? (last.carry_over ?? null) : null;
+    const gap = expected === null ? 0 : d.opening_balance - expected;
+    if (gap !== 0 && (!d.justification || d.justification.length < 5)) {
+      const e = badRequest(`Le solde d'ouverture (${fmtGNF(d.opening_balance)}) diffère du report de la clôture ${last.number} (${fmtGNF(expected)}) : une justification est obligatoire.`);
+      e.code = 'OPENING_MISMATCH';
+      throw e;
+    }
     const number = await nextNumber(db, 'cash_session', 'CAI');
     const { rows: [s] } = await db.query(
-      `INSERT INTO cash_sessions (register_id, number, opening_balance, opened_by) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [reg.id, number, d.opening_balance, req.user.id]);
+      `INSERT INTO cash_sessions (register_id, number, opening_balance, opened_by, carried_from_session_id, expected_opening, opening_justification)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [reg.id, number, d.opening_balance, req.user.id, last?.id ?? null, expected, gap ? d.justification : null]);
     await audit(db, req.ctx, {
       action: 'cash.open', entityType: 'cash_session', entityId: s.id,
-      summary: `Ouverture de caisse ${number} — solde initial ${fmtGNF(d.opening_balance)}`,
-      newValue: { opening_balance: d.opening_balance, last_declared_balance: last?.declared_balance ?? null },
+      summary: `Ouverture de caisse ${number} — solde initial ${fmtGNF(d.opening_balance)}${expected !== null ? ` (report attendu ${fmtGNF(expected)} de ${last.number})` : ''}`,
+      newValue: { opening_balance: d.opening_balance, expected_opening: expected, carried_from: last?.number ?? null, gap },
+      reason: gap ? d.justification : null,
       feed: { kind: 'cash' },
     });
+    if (gap !== 0) {
+      await raiseAlert(db, req.ctx, {
+        category: 'financiere', type: 'ecart_report_caisse', severity: 'haute',
+        title: `Écart de report de caisse : ${fmtGNF(gap)} (${number})`,
+        details: { message: `Report attendu ${fmtGNF(expected)} (clôture ${last.number}), ouverture ${fmtGNF(d.opening_balance)} — ${req.user.fullName}. Justification : ${d.justification}` },
+        refType: 'cash_session', refId: s.id, userId: req.user.id, link: `/caisse/sessions/${s.id}`,
+      });
+    }
     req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'cash' });
     return s;
   });
@@ -94,12 +175,25 @@ router.post('/close', requirePerm('cash.operate'), ah(async (req, res) => {
     session_id: z.coerce.number().int().positive().optional(),
     declared_balance: z.coerce.number().int().min(0),
     justification: z.string().trim().max(2000).optional().nullable(),
+    // argent laissé dans le tiroir pour la session suivante (défaut : tout le solde déclaré)
+    carry_over: z.coerce.number().int().min(0).optional().nullable(),
+    withdrawal_note: z.string().trim().max(500).optional().nullable(),
   }), req.body);
+  const carry = d.carry_over ?? d.declared_balance;
+  if (carry > d.declared_balance) throw badRequest('Le montant reporté ne peut dépasser le solde déclaré.');
+  const withdrawn = d.declared_balance - carry;
+  if (withdrawn > 0 && (!d.withdrawal_note || d.withdrawal_note.length < 3)) {
+    throw badRequest(`Retrait de ${fmtGNF(withdrawn)} : indiquez sa destination (coffre, banque, propriétaire…).`);
+  }
   const settings = await getSettings();
   const result = await tx(async (db) => {
-    const { rows: [s] } = await db.query(
-      `SELECT * FROM cash_sessions WHERE status = 'ouverte' AND ($1::int IS NULL OR id = $1) ORDER BY id LIMIT 1 FOR UPDATE`,
-      [d.session_id ?? null]);
+    let sessionId = d.session_id ?? null;
+    if (!sessionId) {
+      const { rows: open } = await db.query(`SELECT id FROM cash_sessions WHERE status = 'ouverte' ORDER BY id`);
+      if (open.length > 1) throw registerRequired();
+      sessionId = open[0]?.id ?? null;
+    }
+    const { rows: [s] } = await db.query(`SELECT * FROM cash_sessions WHERE status = 'ouverte' AND id = $1 FOR UPDATE`, [sessionId]);
     if (!s) throw badRequest('Aucune caisse ouverte.');
     const totals = await sessionTotals(db, s.id);
     const discrepancy = d.declared_balance - totals.expected_balance;
@@ -108,12 +202,12 @@ router.post('/close', requirePerm('cash.operate'), ah(async (req, res) => {
     }
     const { rows: [closed] } = await db.query(
       `UPDATE cash_sessions SET status = 'cloturee', expected_balance = $2, declared_balance = $3, discrepancy = $4,
-         justification = $5, closed_by = $6, closed_at = now() WHERE id = $1 RETURNING *`,
-      [s.id, totals.expected_balance, d.declared_balance, discrepancy, d.justification || null, req.user.id]);
+         justification = $5, closed_by = $6, closed_at = now(), carry_over = $7, withdrawn = $8, withdrawal_note = $9 WHERE id = $1 RETURNING *`,
+      [s.id, totals.expected_balance, d.declared_balance, discrepancy, d.justification || null, req.user.id, carry, withdrawn, withdrawn ? d.withdrawal_note : null]);
     await audit(db, req.ctx, {
       action: 'cash.close', entityType: 'cash_session', entityId: s.id,
       summary: `Clôture de caisse ${s.number} — théorique ${fmtGNF(totals.expected_balance)}, déclarée ${fmtGNF(d.declared_balance)}, écart ${fmtGNF(discrepancy)}`,
-      newValue: { ...totals, declared_balance: d.declared_balance, discrepancy }, reason: d.justification || null,
+      newValue: { ...totals, declared_balance: d.declared_balance, discrepancy, carry_over: carry, withdrawn, withdrawal_note: withdrawn ? d.withdrawal_note : null }, reason: d.justification || null,
       feed: { kind: 'cash', amount: discrepancy },
     });
     if (Math.abs(discrepancy) > (settings.finance.cash_tolerance || 0)) {

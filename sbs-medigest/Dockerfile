@@ -15,6 +15,8 @@ WORKDIR /app
 COPY backend/package*.json ./
 RUN npm ci --omit=dev
 COPY backend/src ./src
+# Jeu de démonstration exclu de l'image de production (garde-fou supplémentaire)
+RUN rm -f src/db/demo.js
 COPY --from=web /web/dist ./public
 RUN mkdir -p /data/uploads && chown -R node:node /data
 USER node

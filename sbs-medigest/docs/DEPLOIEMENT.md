@@ -6,6 +6,21 @@ automatique (Let's Encrypt), sauvegardes chiffrées hors serveur et accès restr
 > **Avant d'y mettre des données réelles de patients**, lisez la section *Risques résiduels* : plusieurs
 > points de sécurité de niveau moyen restent ouverts et doivent être acceptés ou corrigés par le propriétaire.
 
+**Documents associés (phase 4)**
+
+- [SAUVEGARDES.md](SAUVEGARDES.md) : stockage distant protégé contre la suppression (verrouillage d'objets), rétention, garde des clés, restauration mensuelle et de sinistre.
+- [RECUPERATION-PROPRIETAIRE.md](RECUPERATION-PROPRIETAIRE.md) : procédure « bris de glace » si le propriétaire perd son accès ou sa 2FA.
+- [MODELES-DOCUMENTS.md](MODELES-DOCUMENTS.md) : validation par le médecin des ordonnances, certificats, comptes rendus, factures et reçus.
+- [PERFORMANCE.md](PERFORMANCE.md) : mesures sur un volume réaliste et index ajoutés.
+- [ARCHITECTURE-ANDROID.md](ARCHITECTURE-ANDROID.md) : installation mobile (PWA) et préparation d'une application Android.
+
+**Points de configuration de production**
+
+- La **double authentification est obligatoire** pour le compte propriétaire (`OWNER_MFA_REQUIRED=true`). Elle doit être activée à la première connexion ; conservez les codes de récupération hors ligne.
+- Déconnexion automatique après **30 min d'inactivité** (`SESSION_IDLE_MINUTES`), durée maximale de 12 h.
+- Le service `migrate` ne reçoit **ni** `AUDIT_HMAC_KEY` **ni** `DATA_ENCRYPTION_KEY` : seule l'application les détient.
+- Le jeu de démonstration est exclu de l'image et bloqué sur une base de production.
+
 ---
 
 ## 0. Ce qu'il faut réunir

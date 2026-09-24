@@ -8,7 +8,10 @@ import { notify } from '../lib/notify.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { nextNumber } from '../lib/numbering.js';
 import { paging, addPeriod, fmtGNF, refreshPaymentStatus } from '../lib/helpers.js';
-import { canClinical, canPrescriptions, canLabResults, encJson, decJson, VITALS as VITAL_FIELDS, patientRef } from '../lib/medical.js';
+import { canClinical, canPrescriptions, canLabResults, encJson, decJson, VITALS as VITAL_FIELDS, patientRef, logMedicalRead } from '../lib/medical.js';
+import { loadPrescription, dispensingLines, PRESCRIPTION_STATUS } from '../lib/prescriptions.js';
+import { getSettings } from '../lib/settings.js';
+import { sendPdf, fmtDate, ageOf } from '../lib/documents.js';
 
 const router = Router();
 const VITALS = VITAL_FIELDS;
@@ -51,7 +54,7 @@ function present(c, user) {
 }
 
 export function presentPrescription(pr) {
-  return { ...pr, notes: decrypt(pr.notes), items: decJson(pr.items, []).map((it, i) => ({ id: i + 1, ...it })) };
+  return { ...pr, notes: decrypt(pr.notes), items: decJson(pr.items, []).map((it, i) => ({ id: i + 1, ...it })), status_label: PRESCRIPTION_STATUS[pr.status] };
 }
 
 async function recomputeAmount(db, id) {
@@ -116,20 +119,29 @@ router.get('/', requirePerm('consultations.view'), ah(async (req, res) => {
     vals.push(`%${String(req.query.q).toLowerCase()}%`);
     where.push(`(lower(c.number) LIKE $${vals.length} OR lower(p.first_name || ' ' || p.last_name) LIKE $${vals.length} OR lower(p.patient_number) LIKE $${vals.length})`);
   }
-  vals.push(limit, offset);
-  const { rows } = await query(
-    `SELECT c.id, c.number, c.consulted_at, c.reason, c.status, c.amount, c.paid_amount, c.payment_status,
-       c.patient_id, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name,
-       d.first_name || ' ' || d.last_name AS doctor_name, count(*) OVER()::int AS total
-     FROM consultations c JOIN patients p ON p.id = c.patient_id LEFT JOIN users d ON d.id = c.doctor_id
-     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY c.consulted_at DESC LIMIT $${vals.length - 1} OFFSET $${vals.length}`, vals);
+  const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  // Page (index sur la date) et total calculés séparément : un total par fenêtre (count OVER)
+  // obligeait à joindre toutes les consultations avant d'en garder 50 (mesuré : 190 ms → < 10 ms).
+  const [{ rows }, { rows: [{ total }] }] = await Promise.all([
+    query(
+      `SELECT c.id, c.number, c.consulted_at, c.reason, c.status, c.amount, c.paid_amount, c.payment_status,
+         c.patient_id, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name,
+         d.first_name || ' ' || d.last_name AS doctor_name
+       FROM consultations c JOIN patients p ON p.id = c.patient_id LEFT JOIN users d ON d.id = c.doctor_id
+       ${w} ORDER BY c.consulted_at DESC LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`, [...vals, limit, offset]),
+    query(`SELECT count(*)::int AS total FROM consultations c${req.query.q ? ' JOIN patients p ON p.id = c.patient_id' : ''} ${w}`, vals),
+  ]);
   const clinical = canClinical(req.user);
-  res.json({ items: rows.map(({ total, ...r }) => ({ ...r, reason: clinical ? decrypt(r.reason) : undefined })), total: rows[0]?.total || 0 });
+  if (clinical && rows.length) await logMedicalRead(req, { access: 'liste_consultations', count: rows.length });
+  res.json({ items: rows.map((r) => ({ ...r, reason: clinical ? decrypt(r.reason) : undefined })), total });
 }));
 
 router.get('/:id', requirePerm('consultations.view'), ah(async (req, res) => {
-  res.json(await getFull({ query }, Number(req.params.id), req.user));
+  const c = await getFull({ query }, Number(req.params.id), req.user);
+  if (canClinical(req.user) || !c.clinical_restricted) {
+    await logMedicalRead(req, { patientId: c.patient_id, patientNumber: c.patient_number, access: 'consultation', ref: c.number });
+  }
+  res.json(c);
 }));
 
 router.post('/', requirePerm('consultations.create'), ah(async (req, res) => {
@@ -298,27 +310,66 @@ router.post('/:id/prescriptions', requirePerm('prescriptions.create'), ah(async 
       product_id: it.product_id || null, drug_name: it.drug_name, dosage: it.dosage || null, frequency: it.frequency || null,
       duration: it.duration || null, quantity: it.quantity ?? null, instructions: it.instructions || null,
     }));
+    const number = await nextNumber(db, 'prescription', 'ORD');
     const { rows: [pr] } = await db.query(
-      'INSERT INTO prescriptions (consultation_id, patient_id, prescribed_by, notes, items) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [id, c.patient_id, req.user.id, encrypt(d.notes || null), encJson(items)]);
+      'INSERT INTO prescriptions (consultation_id, patient_id, prescribed_by, notes, items, number) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [id, c.patient_id, req.user.id, encrypt(d.notes || null), encJson(items), number]);
     await audit(db, req.ctx, {
       action: 'prescription.create', entityType: 'prescription', entityId: pr.id,
-      summary: `Prescription (${d.items.length} ligne(s)) — consultation ${c.number}`, feed: false,
+      summary: `Prescription ${number} (${d.items.length} ligne(s)) — consultation ${c.number}`, feed: false,
     });
     return getFull(db, id, req.user);
   });
   res.status(201).json(out);
 }));
 
-// Prescription pour la pharmacie (sans données cliniques de la consultation)
+// Prescription pour la pharmacie (sans données cliniques de la consultation), avec l'état de délivrance par ligne
 router.get('/prescriptions/:pid', requirePerm('pharmacy.sell', 'prescriptions.create', 'patients.view_medical'), ah(async (req, res) => {
-  const { rows: [pr] } = await query(
-    `SELECT pr.id, pr.patient_id, pr.created_at, pr.notes, pr.items, p.first_name || ' ' || p.last_name AS patient_name, p.patient_number,
-       u.first_name || ' ' || u.last_name AS prescriber
-     FROM prescriptions pr JOIN patients p ON p.id = pr.patient_id LEFT JOIN users u ON u.id = pr.prescribed_by WHERE pr.id = $1`,
-    [Number(req.params.pid)]);
-  if (!pr) throw notFound('Prescription introuvable');
-  res.json(presentPrescription(pr));
+  const pr = await loadPrescription({ query }, Number(req.params.pid));
+  const lines = await dispensingLines({ query }, pr);
+  await logMedicalRead(req, { patientId: pr.patient_id, patientNumber: pr.patient_number, access: 'prescription', ref: pr.number });
+  res.json({
+    id: pr.id, number: pr.number, status: pr.status, status_label: PRESCRIPTION_STATUS[pr.status],
+    patient_id: pr.patient_id, patient_name: pr.patient_name, patient_number: pr.patient_number,
+    prescribed_by: pr.prescribed_by, prescriber: pr.prescriber, consultation_id: pr.consultation_id, consultation_number: pr.consultation_number,
+    created_at: pr.created_at, notes: decrypt(pr.notes),
+    items: lines.map((l) => ({ id: l.line, ...l })),
+  });
+}));
+
+// Ordonnance imprimable (PDF A4)
+router.get('/prescriptions/:pid/pdf', requirePerm('pharmacy.sell', 'prescriptions.create', 'patients.view_medical'), ah(async (req, res) => {
+  const pr = await loadPrescription({ query }, Number(req.params.pid));
+  const items = decJson(pr.items, []);
+  const { clinic } = await getSettings();
+  await logMedicalRead(req, { patientId: pr.patient_id, patientNumber: pr.patient_number, access: 'ordonnance_pdf', ref: pr.number });
+  sendPdf(res, {
+    filename: `ordonnance-${pr.number}.pdf`, clinic, title: 'Ordonnance', type: 'ordonnance', number: pr.number, issuedAt: pr.created_at,
+  }, (doc, h) => {
+    const age = ageOf(pr.patient_birth_date, pr.created_at);
+    h.row('Patient :', `${pr.patient_name} (${pr.patient_number})`);
+    h.row('Âge / sexe :', `${age !== null ? `${age} an${age > 1 ? 's' : ''}` : '—'} / ${pr.patient_sex === 'F' ? 'Féminin' : pr.patient_sex === 'M' ? 'Masculin' : '—'}`);
+    h.row('Prescripteur :', `Dr ${pr.prescriber || '—'}${pr.prescriber_title ? ` — ${pr.prescriber_title}` : ''}`);
+    if (pr.prescriber_professional_id) h.row('N° d\'inscription à l\'Ordre :', pr.prescriber_professional_id);
+    h.row('Date :', fmtDate(pr.created_at));
+    if (pr.consultation_number) h.row('Consultation :', pr.consultation_number);
+    h.section('Prescription');
+    items.forEach((it, i) => {
+      h.ensureSpace(60);
+      doc.font('Helvetica-Bold').fontSize(11.5).text(`${i + 1}. ${it.drug_name}${it.quantity ? `   — Qté : ${it.quantity}` : ''}`);
+      const posology = [it.dosage, it.frequency].filter(Boolean).join(' — ');
+      doc.font('Helvetica').fontSize(10.5);
+      if (posology) doc.text(`Posologie : ${posology}`, { indent: 14 });
+      if (it.duration) doc.text(`Durée : ${it.duration}`, { indent: 14 });
+      if (it.instructions) doc.text(`Instructions : ${it.instructions}`, { indent: 14 });
+      doc.moveDown(0.5);
+    });
+    const notes = decrypt(pr.notes);
+    if (notes) { h.section('Recommandations'); doc.text(notes); }
+    h.ensureSpace(90);
+    doc.moveDown(2).font('Helvetica').fontSize(10).text('Signature et cachet du prescripteur', 50 + h.W / 2, doc.y, { width: h.W / 2, align: 'center' });
+    doc.moveDown(3);
+  });
 }));
 
 export default router;

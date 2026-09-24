@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { useRealtime } from '../realtime.js';
 import {
-  PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, PatientPicker, ReasonModal, useToast,
+  PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, PatientPicker, ReasonModal, useToast, RegisterSelect,
   PeriodFilter, periodParams, Money,
 } from '../components/ui.jsx';
 import { dateTime, date, time, gnf, LABELS, toCSV, download } from '../format.js';
@@ -67,7 +67,7 @@ export function PaymentNew() {
   const [patient, setPatient] = useState(null);
   const [mode, setMode] = useState('pending');
   const [item, setItem] = useState(null);
-  const [f, setF] = useState({ method: 'especes', reference: '', discount: 0, amount: '', act_id: '', quantity: 1, description: '', payer_name: '' });
+  const [f, setF] = useState({ method: 'especes', reference: '', discount: 0, amount: '', act_id: '', quantity: 1, description: '', payer_name: '', register_id: '' });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const idemKey = useMemo(() => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`), []);
@@ -93,7 +93,7 @@ export function PaymentNew() {
 
   const submit = async (e) => {
     e.preventDefault(); setBusy(true); setError(null);
-    const body = { method: f.method, reference: f.reference || null, discount: Number(f.discount) || 0, patient_id: patient?.id || null, payer_name: f.payer_name || null };
+    const body = { method: f.method, reference: f.reference || null, discount: Number(f.discount) || 0, patient_id: patient?.id || null, payer_name: f.payer_name || null, register_id: f.register_id ? Number(f.register_id) : null };
     if (mode === 'pending') Object.assign(body, { source_type: item.source_type, source_id: item.source_id, amount: Number(f.amount) });
     else if (mode === 'act') Object.assign(body, { source_type: 'act', act_id: Number(f.act_id), quantity: Number(f.quantity) });
     else Object.assign(body, { source_type: 'other', amount: Number(f.amount), description: f.description });
@@ -148,6 +148,7 @@ export function PaymentNew() {
         <Card title="2. Règlement">
           <div className="form">
             <Field label="Mode de paiement"><select value={f.method} onChange={(e) => setF({ ...f, method: e.target.value })}>{METHODS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
+            <RegisterSelect value={f.register_id} onChange={(v) => setF((x) => ({ ...x, register_id: v }))} required={f.method === 'especes'} />
             {f.method !== 'especes' && <Field label="Référence de transaction" required={f.method !== 'autre'}><input value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} placeholder="ID de transaction Orange Money / MTN, n° virement…" required={f.method !== 'autre'} /></Field>}
             {can('payments.discount') && <Field label="Remise (GNF)" hint="Toute remise est tracée ; une remise importante déclenche une alerte."><input type="number" min="0" value={f.discount} onChange={(e) => setF({ ...f, discount: e.target.value })} /></Field>}
             <dl className="kv"><dt>Montant</dt><dd>{gnf(gross)}</dd>{Number(f.discount) > 0 && <><dt>Remise</dt><dd>- {gnf(f.discount)}</dd></>}<dt>Net à encaisser</dt><dd><b style={{ fontSize: '1.3rem' }}>{gnf(net)}</b></dd></dl>
@@ -193,7 +194,8 @@ export function PaymentDetail() {
   const toast = useToast();
   const { data: p, reload, error } = useFetch(`/payments/${id}`);
   const [modal, setModal] = useState(null);
-  const [edit, setEdit] = useState({ amount: '', method: '', reference: '' });
+  const [edit, setEdit] = useState({ amount: '', method: '', reference: '', register_id: '' });
+  const [refundRegister, setRefundRegister] = useState('');
   useEffect(() => { if (p && sp.get('print') === '1') toast('Reçu prêt : imprimez, téléchargez ou partagez.'); }, [p?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   if (error) return <ErrorBox error={error} />;
   if (!p) return <Empty>Chargement…</Empty>;
@@ -251,17 +253,18 @@ export function PaymentDetail() {
       </div>
       {modal === 'edit' && (
         <ReasonModal title="Modifier le paiement" confirmLabel="Enregistrer la modification" onClose={() => setModal(null)}
-          onConfirm={async (reason) => { await api.put(`/payments/${p.id}`, { amount: Number(edit.amount), method: edit.method, reference: edit.reference || null, reason }); toast('Paiement modifié (tracé)'); reload(); }}>
+          onConfirm={async (reason) => { await api.put(`/payments/${p.id}`, { amount: Number(edit.amount), method: edit.method, reference: edit.reference || null, register_id: edit.register_id ? Number(edit.register_id) : null, reason }); toast('Paiement modifié (tracé)'); reload(); }}>
           <div className="alert-box warn">Toute modification est enregistrée dans le journal d'audit et signalée à l'administrateur.</div>
           <div className="form-grid">
             <Field label="Montant net"><input type="number" min="0" value={edit.amount} onChange={(e) => setEdit({ ...edit, amount: e.target.value })} /></Field>
             <Field label="Mode"><select value={edit.method} onChange={(e) => setEdit({ ...edit, method: e.target.value })}>{METHODS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
+            {edit.method === 'especes' && p.method !== 'especes' && <RegisterSelect value={edit.register_id} onChange={(v) => setEdit((x) => ({ ...x, register_id: v }))} />}
             <Field label="Référence"><input value={edit.reference} onChange={(e) => setEdit({ ...edit, reference: e.target.value })} /></Field>
           </div>
         </ReasonModal>
       )}
       {modal === 'cancel' && <ReasonModal title="Annuler le paiement" danger confirmLabel="Annuler le paiement" onClose={() => setModal(null)} onConfirm={async (reason) => { await api.post(`/payments/${p.id}/cancel`, { reason }); reload(); }}><p className="muted">L'annulation n'est possible que tant que la caisse du paiement est ouverte. Le montant sera retiré de la caisse.</p></ReasonModal>}
-      {modal === 'refund' && <ReasonModal title={`Rembourser ${gnf(p.amount)}`} danger confirmLabel="Rembourser" onClose={() => setModal(null)} onConfirm={async (reason) => { await api.post(`/payments/${p.id}/refund`, { reason }); reload(); }}><p className="muted">Un remboursement en espèces sort de la caisse actuellement ouverte.</p></ReasonModal>}
+      {modal === 'refund' && <ReasonModal title={`Rembourser ${gnf(p.amount)}`} danger confirmLabel="Rembourser" onClose={() => setModal(null)} onConfirm={async (reason) => { await api.post(`/payments/${p.id}/refund`, { reason, register_id: refundRegister ? Number(refundRegister) : null }); reload(); }}><p className="muted">Un remboursement en espèces sort de la caisse ouverte choisie.</p>{p.method === 'especes' && <RegisterSelect value={refundRegister} onChange={setRefundRegister} />}</ReasonModal>}
     </>
   );
 }

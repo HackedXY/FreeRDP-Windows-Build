@@ -10,6 +10,11 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
+# Aucun processus ne peut acquérir de privilèges supplémentaires (setuid…)
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
 services:
   db:
     logging: *logging
@@ -32,8 +37,13 @@ services:
 
   # Migrations + initialisation : seul service à détenir les identifiants propriétaire.
   # S'exécute puis s'arrête (docker compose run --rm migrate pour une mise à jour).
+  # Séparation des secrets : il ne reçoit NI la clé de chiffrement médical NI la clé HMAC
+  # du journal d'audit (propriétaire de la base + clé HMAC = réécriture indétectable).
+  # Seule exception documentée : récupération du compte propriétaire (-e AUDIT_HMAC_KEY),
+  # voir docs/RECUPERATION-PROPRIETAIRE.md.
   migrate:
     logging: *logging
+    <<: *hardening
     build: .
     restart: "no"
     depends_on:
@@ -42,13 +52,12 @@ services:
     environment:
       MIGRATION_DATABASE_URL: postgres://sbs:${OWNER_DB_PASSWORD}@db:5432/sbs
       DATABASE_URL: postgres://sbs_app:${APP_DB_PASSWORD}@db:5432/sbs
-      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY requis}
-      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:?AUDIT_HMAC_KEY requis}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
 
   app:
     logging: *logging
+    <<: *hardening
     build: .
     restart: unless-stopped
     depends_on:
@@ -56,19 +65,25 @@ services:
     environment:
       # Rôle restreint : pas de droits propriétaire (l'application refuse de démarrer sinon)
       DATABASE_URL: postgres://sbs_app:${APP_DB_PASSWORD}@db:5432/sbs
-      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY}
-      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?DATA_ENCRYPTION_KEY requis}
+      AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:?AUDIT_HMAC_KEY requis}
       COOKIE_SECURE: "true"
+      OWNER_MFA_REQUIRED: "true"
       BACKUP_MONITORING: "on"
+      # Déconnexion automatique après inactivité (minutes) ; durée maximale d'une session : 12 h
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
     volumes:
       - uploads:/data/uploads
 
   # Reverse proxy HTTPS (certificat Let's Encrypt automatique)
   caddy:
     logging: *logging
+    <<: *hardening
     image: caddy:2-alpine
     restart: unless-stopped
-    depends_on: [app]
+    # attend que l'API réponde (HEALTHCHECK de l'image) ; redémarrage automatique après un reboot
+    depends_on:
+      app: { condition: service_healthy }
     ports: ["80:80", "443:443"]
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN requis}
@@ -83,6 +98,7 @@ services:
   # backup_runs. L'application alerte (haute) en cas d'échec ou d'absence de sauvegarde > 26 h.
   backup:
     logging: *logging
+    <<: *hardening
     build: .
     restart: unless-stopped
     depends_on:
@@ -94,6 +110,8 @@ services:
       BACKUP_TARGET: ${BACKUP_TARGET:?BACKUP_TARGET requis (ex. rclone:distant:sbs-sauvegardes)}
       BACKUP_PUBLIC_KEY_FILE: /run/secrets/backup-public.pem
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-30}
+      # off (recommandé) : le serveur ne supprime rien ; rétention par le stockage (docs/SAUVEGARDES.md)
+      BACKUP_REMOTE_PRUNE: ${BACKUP_REMOTE_PRUNE:-off}
       BACKUP_HOUR: ${BACKUP_HOUR:-2}
       UPLOAD_DIR: /data/uploads
       TZ: Africa/Conakry

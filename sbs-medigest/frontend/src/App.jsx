@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth.jsx';
 import Layout from './components/Layout.jsx';
-import { Login, ChangePassword } from './pages/Auth.jsx';
+import { Login, ChangePassword, ForcedMfaSetup } from './pages/Auth.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import { PatientList, PatientDetail } from './pages/Patients.jsx';
 import { ConsultationList, ConsultationDetail } from './pages/Consultations.jsx';
@@ -19,6 +19,7 @@ import { Employees, EmployeeDetail } from './pages/Employees.jsx';
 import Roles from './pages/Roles.jsx';
 import Catalog from './pages/Catalog.jsx';
 import Settings from './pages/Settings.jsx';
+import { InvoiceList, InvoiceDetail, DocumentVerify } from './pages/Invoices.jsx';
 
 function Home() {
   const { can } = useAuth();
@@ -35,6 +36,7 @@ export default function App() {
   if (loading) return <div className="empty">Chargement…</div>;
   if (!user) return <Login />;
   if (user.mustChangePassword) return <ChangePassword forced />;
+  if (user.mfaSetupRequired) return <ForcedMfaSetup />;
   return (
     <Routes>
       <Route element={<Layout />}>
@@ -47,6 +49,9 @@ export default function App() {
         <Route path="paiements" element={<PaymentList />} />
         <Route path="paiements/nouveau" element={<PaymentNew />} />
         <Route path="paiements/:id" element={<PaymentDetail />} />
+        <Route path="factures" element={<InvoiceList />} />
+        <Route path="factures/:id" element={<InvoiceDetail />} />
+        <Route path="verification" element={<DocumentVerify />} />
         <Route path="caisse" element={<Cash />} />
         <Route path="caisse/sessions/:id" element={<CashSession />} />
         <Route path="depenses" element={<Expenses />} />

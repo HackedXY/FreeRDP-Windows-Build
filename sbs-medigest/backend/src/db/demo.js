@@ -1,16 +1,27 @@
 // Données de démonstration : 5 employés, patients, stock, activité du jour.
 // Usage : npm run demo   (sur une base fraîchement initialisée)
 import http from 'node:http';
-import { pool } from './pool.js';
-import { migrate } from './migrate.js';
-import { seed } from './seed.js';
-import { createApp } from '../app.js';
+import { assertDemoEnvironment, assertDemoDatabase, DemoRefused } from './demo-guard.js';
+
+// Barrière 1 : avant tout chargement de configuration ou connexion à une base
+try { assertDemoEnvironment(); } catch (e) { console.error(`✖ ${e.message}`); process.exit(1); }
+const { pool } = await import('./pool.js');
+const { migrate } = await import('./migrate.js');
+const { seed } = await import('./seed.js');
+const { createApp } = await import('../app.js');
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'ChangeMoi2026';
 const DEMO_PASSWORD = 'Sbs2026demo';
 
 await migrate();
 await seed();
+// Barrières 2 et 3 : base marquée production ou déjà utilisée
+try { await assertDemoDatabase(pool); } catch (e) {
+  if (!(e instanceof DemoRefused)) throw e;
+  console.error(`✖ ${e.message}`);
+  await pool.end();
+  process.exit(1);
+}
 const server = http.createServer(createApp()).listen(0);
 const base = `http://127.0.0.1:${server.address().port}/api`;
 

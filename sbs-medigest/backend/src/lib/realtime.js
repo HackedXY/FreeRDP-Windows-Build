@@ -23,8 +23,8 @@ export async function authorizeSocket(socket, force = false) {
   if (!d?.sessionId) { socket.disconnect(true); return null; }
   if (!force && d.expiresAt <= Date.now()) { socket.disconnect(true); return null; }
   if (force || Date.now() - d.checkedAt > CACHE_MS) {
-    const user = await userFromSessionId(d.sessionId);
-    if (!user || user.mustChangePassword || user.sessionExpiresAt <= Date.now()) { socket.disconnect(true); return null; }
+    const user = await userFromSessionId(d.sessionId, { touch: false }); // le temps réel ne prolonge pas la session
+    if (!user || user.mustChangePassword || user.mfaSetupRequired || user.sessionExpiresAt <= Date.now()) { socket.disconnect(true); return null; }
     d.user = user; d.expiresAt = user.sessionExpiresAt; d.checkedAt = Date.now();
   }
   return d.user;

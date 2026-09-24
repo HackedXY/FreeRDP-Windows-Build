@@ -9,6 +9,8 @@ import { nextNumber } from '../lib/numbering.js';
 import { fmtGNF, paging, addPeriod, refreshPaymentStatus } from '../lib/helpers.js';
 import { moveStock, checkStockLevel, REASON_LABELS } from '../lib/stock.js';
 import { createPayment } from './payments.js';
+import { resolveUnpaidSaleAlert } from '../lib/receivables.js';
+import { loadPrescription, recordDispensations, refreshPrescriptionStatus, PRESCRIPTION_STATUS } from '../lib/prescriptions.js';
 
 const router = Router();
 
@@ -184,6 +186,32 @@ router.post('/stock/out', requirePerm('stock.move'), ah(async (req, res) => {
   res.status(201).json(out);
 }));
 
+// ------------------------------------------------------------------ Prescriptions à délivrer
+// Liste sans contenu médical (ni médicaments ni posologie) : le détail passe par
+// GET /api/consultations/prescriptions/:id, journalisé comme lecture de données médicales.
+router.get('/prescriptions', requirePerm('pharmacy.sell'), ah(async (req, res) => {
+  const { limit, offset } = paging(req);
+  const where = []; const vals = [];
+  if (req.query.status === 'a_delivrer' || !req.query.status) where.push(`pr.status IN ('en_attente','partielle')`);
+  else if (req.query.status !== 'toutes') { vals.push(req.query.status); where.push(`pr.status = $${vals.length}`); }
+  if (req.query.patient_id) { vals.push(Number(req.query.patient_id)); where.push(`pr.patient_id = $${vals.length}`); }
+  if (req.query.q) {
+    vals.push(`%${String(req.query.q).toLowerCase()}%`);
+    where.push(`(lower(pr.number) LIKE $${vals.length} OR lower(p.patient_number) LIKE $${vals.length} OR lower(p.first_name || ' ' || p.last_name) LIKE $${vals.length})`);
+  }
+  addPeriod(where, vals, 'pr.created_at', req.query);
+  vals.push(limit, offset);
+  const { rows } = await query(
+    `SELECT pr.id, pr.number, pr.status, pr.created_at, pr.patient_id, p.patient_number, p.first_name || ' ' || p.last_name AS patient_name,
+       u.first_name || ' ' || u.last_name AS prescriber,
+       (SELECT max(d.dispensed_at) FROM prescription_dispensations d WHERE d.prescription_id = pr.id AND d.cancelled_at IS NULL) AS last_dispensed_at,
+       count(*) OVER()::int AS total
+     FROM prescriptions pr JOIN patients p ON p.id = pr.patient_id LEFT JOIN users u ON u.id = pr.prescribed_by
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY pr.created_at DESC LIMIT $${vals.length - 1} OFFSET $${vals.length}`, vals);
+  res.json({ items: rows.map(({ total, ...r }) => ({ ...r, status_label: PRESCRIPTION_STATUS[r.status] })), total: rows[0]?.total || 0 });
+}));
+
 // ------------------------------------------------------------------ Ventes
 router.get('/sales', requirePerm('pharmacy.sell', 'payments.view'), ah(async (req, res) => {
   const { limit, offset } = paging(req);
@@ -205,15 +233,28 @@ router.post('/sales', requirePerm('pharmacy.sell'), ah(async (req, res) => {
     patient_id: z.coerce.number().int().positive().optional().nullable(),
     customer_name: z.string().trim().max(150).optional().nullable(),
     prescription_id: z.coerce.number().int().positive().optional().nullable(),
-    items: z.array(z.object({ product_id: z.coerce.number().int().positive(), quantity: z.coerce.number().int().min(1) })).min(1),
+    items: z.array(z.object({
+      product_id: z.coerce.number().int().positive(),
+      quantity: z.coerce.number().int().min(1),
+      prescription_line: z.coerce.number().int().positive().optional().nullable(), // ligne de la prescription délivrée
+    })).min(1),
     payment: z.object({
       method: z.enum(['especes', 'orange_money', 'mtn_money', 'virement', 'autre']),
       reference: z.string().trim().max(100).optional().nullable(),
       discount: z.coerce.number().int().min(0).optional(),
+      register_id: z.coerce.number().int().positive().optional().nullable(),
     }).optional().nullable(),
   }), req.body);
   if (d.payment && !can(req.user, 'payments.create')) throw forbidden('Vous n\'êtes pas autorisé à encaisser : la vente sera réglée en caisse.');
+  if (d.items.some((it) => it.prescription_line) && !d.prescription_id) throw badRequest('Ligne de prescription indiquée sans prescription.');
   const out = await tx(async (db) => {
+    // Délivrance sur prescription : verrou sur la prescription (délivrances concurrentes), patient imposé
+    let pr = null;
+    if (d.prescription_id) {
+      pr = await loadPrescription(db, d.prescription_id, { lock: true });
+      if (d.patient_id && d.patient_id !== pr.patient_id) throw badRequest('Le patient ne correspond pas à la prescription.');
+      d.patient_id = pr.patient_id;
+    }
     const number = await nextNumber(db, 'pharmacy_sale', 'VTE');
     let amount = 0; const lines = [];
     for (const it of d.items) {
@@ -229,6 +270,18 @@ router.post('/sales', requirePerm('pharmacy.sell'), ah(async (req, res) => {
       await db.query('INSERT INTO pharmacy_sale_items (sale_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)', [s.id, l.product_id, l.quantity, l.unit_price]);
       await moveStock(db, req.ctx, { productId: l.product_id, delta: -l.quantity, reason: 'vente', refType: 'pharmacy_sale', refId: s.id });
     }
+    let prescription = null;
+    if (pr) {
+      const r = await recordDispensations(db, req, pr, s.id, d.items);
+      prescription = { id: pr.id, number: pr.number, status: r.status };
+      const delivered = d.items.filter((it) => it.prescription_line);
+      await audit(db, req.ctx, {
+        action: 'prescription.dispense', entityType: 'prescription', entityId: pr.id,
+        summary: `Délivrance sur prescription ${pr.number} — vente ${number} (${delivered.length} ligne(s))`,
+        newValue: { sale: number, status: r.status, lines: delivered.map((it) => ({ line: it.prescription_line, product_id: it.product_id, quantity: it.quantity })) },
+        feed: false,
+      });
+    }
     await audit(db, req.ctx, {
       action: 'pharmacy.sale', entityType: 'pharmacy_sale', entityId: s.id,
       // les médicaments délivrés à un patient sont une information médicale : pas de libellé dans le fil
@@ -240,11 +293,11 @@ router.post('/sales', requirePerm('pharmacy.sell'), ah(async (req, res) => {
     if (d.payment) {
       ({ payment } = await createPayment(db, req, {
         source_type: 'pharmacy_sale', source_id: s.id, patient_id: d.patient_id, payer_name: d.customer_name,
-        method: d.payment.method, reference: d.payment.reference, discount: d.payment.discount || 0,
+        method: d.payment.method, reference: d.payment.reference, discount: d.payment.discount || 0, register_id: d.payment.register_id ?? null,
       }));
     }
     req.ctx.emit('perm:dashboard.finance', 'stats', { kind: 'pharmacy' });
-    return { ...s, items: lines, payment };
+    return { ...s, items: lines, payment, prescription };
   });
   res.status(201).json(out);
 }));
@@ -264,6 +317,13 @@ router.post('/sales/:id/cancel', requirePerm('pharmacy.cancel_sale'), ah(async (
       await moveStock(db, req.ctx, { productId: it.product_id, delta: it.quantity, reason: 'annulation_vente', refType: 'pharmacy_sale', refId: id, note: reason });
     }
     await db.query(`UPDATE pharmacy_sales SET status = 'annulee', cancel_reason = $2 WHERE id = $1`, [id, reason]);
+    await resolveUnpaidSaleAlert(db, id, 'Résolue automatiquement : vente annulée');
+    // délivrances annulées : les quantités redeviennent à délivrer sur la prescription
+    if (s.prescription_id) {
+      await db.query('UPDATE prescription_dispensations SET cancelled_at = now(), cancelled_by = $2 WHERE sale_id = $1 AND cancelled_at IS NULL', [id, req.user.id]);
+      const pr = await loadPrescription(db, s.prescription_id, { lock: true });
+      await refreshPrescriptionStatus(db, pr);
+    }
     await audit(db, req.ctx, {
       action: 'pharmacy.sale_cancel', entityType: 'pharmacy_sale', entityId: id, summary: `Annulation de la vente ${s.number} — ${fmtGNF(s.amount)}`,
       oldValue: { status: 'valide' }, newValue: { status: 'annulee' }, reason,

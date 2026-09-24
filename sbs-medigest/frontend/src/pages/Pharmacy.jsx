@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import {
   PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, useToast, PeriodFilter, periodParams, Money,
-  PatientPicker, Tabs, ReasonModal, useForm,
+  PatientPicker, Tabs, ReasonModal, useForm, RegisterSelect,
 } from '../components/ui.jsx';
 import { date, dateTime, gnf, num, LABELS, todayISO } from '../format.js';
 
@@ -99,7 +99,7 @@ function SalePanel({ onDone }) {
   const [customer, setCustomer] = useState('');
   const [cart, setCart] = useState([]);
   const [q, setQ] = useState('');
-  const [pay, setPay] = useState({ now: can('payments.create'), method: 'especes', reference: '' });
+  const [pay, setPay] = useState({ now: can('payments.create'), method: 'especes', reference: '', register_id: '' });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const add = (p) => setCart((c) => { const ex = c.find((x) => x.product.id === p.id); return ex ? c.map((x) => x === ex ? { ...x, quantity: x.quantity + 1 } : x) : [...c, { product: p, quantity: 1 }]; });
@@ -109,7 +109,7 @@ function SalePanel({ onDone }) {
     setBusy(true); setError(null);
     try {
       const body = { patient_id: patient?.id || null, customer_name: customer || null, items: cart.map((x) => ({ product_id: x.product.id, quantity: x.quantity })) };
-      if (pay.now) body.payment = { method: pay.method, reference: pay.reference || null };
+      if (pay.now) body.payment = { method: pay.method, reference: pay.reference || null, register_id: pay.register_id ? Number(pay.register_id) : null };
       const s = await api.post('/pharmacy/sales', body);
       toast(`Vente ${s.number} enregistrée — ${gnf(s.amount)}`);
       setCart([]); setPatient(null); setCustomer('');
@@ -146,6 +146,7 @@ function SalePanel({ onDone }) {
           {pay.now && <div className="form-grid">
             <Field label="Mode"><select value={pay.method} onChange={(e) => setPay({ ...pay, method: e.target.value })}>{Object.entries(LABELS.method).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
             {pay.method !== 'especes' && <Field label="Référence"><input value={pay.reference} onChange={(e) => setPay({ ...pay, reference: e.target.value })} /></Field>}
+            <RegisterSelect value={pay.register_id} onChange={(v) => setPay((x) => ({ ...x, register_id: v }))} required={pay.method === 'especes'} />
           </div>}
           {pay.now && pay.method === 'especes' && cash && !cash.length && <div className="alert-box warn">Aucune caisse ouverte.</div>}
           {!pay.now && <p className="hint">La vente sera réglée à la caisse.</p>}
@@ -154,6 +155,111 @@ function SalePanel({ onDone }) {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** Délivrance d'une prescription : quantités prescrites / délivrées / restantes par ligne. */
+function DispenseModal({ id, onClose, onDone }) {
+  const { can } = useAuth();
+  const toast = useToast();
+  const { data: pr, error: loadError } = useFetch(`/consultations/prescriptions/${id}`);
+  const { data: products } = useFetch('/pharmacy/products');
+  const [lines, setLines] = useState({});
+  const [pay, setPay] = useState({ now: can('payments.create'), method: 'especes', reference: '', register_id: '' });
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!pr) return;
+    setLines(Object.fromEntries(pr.items.map((l) => [l.line, {
+      selected: l.remaining_quantity === null ? l.dispensed_quantity === 0 : l.remaining_quantity > 0,
+      product_id: l.product_id || '', quantity: l.remaining_quantity ?? 1,
+    }])));
+  }, [pr]);
+  if (loadError) return <Modal title="Prescription" onClose={onClose}><ErrorBox error={loadError} /></Modal>;
+  if (!pr) return <Modal title="Prescription" onClose={onClose}><Empty>Chargement…</Empty></Modal>;
+  const set = (line, k, v) => setLines({ ...lines, [line]: { ...lines[line], [k]: v } });
+  const chosen = pr.items.filter((l) => lines[l.line]?.selected);
+  const priceOf = (pid) => products?.find((p) => p.id === Number(pid))?.sale_price || 0;
+  const total = chosen.reduce((s, l) => s + priceOf(lines[l.line].product_id) * (Number(lines[l.line].quantity) || 0), 0);
+  const submit = async () => {
+    setBusy(true); setError(null);
+    try {
+      const items = chosen.map((l) => ({ product_id: Number(lines[l.line].product_id), quantity: Number(lines[l.line].quantity), prescription_line: l.line }));
+      if (items.some((i) => !i.product_id || !i.quantity)) throw new Error('Choisissez le produit et la quantité de chaque ligne à délivrer.');
+      const body = { prescription_id: pr.id, items };
+      if (pay.now) body.payment = { method: pay.method, reference: pay.reference || null, register_id: pay.register_id ? Number(pay.register_id) : null };
+      const s = await api.post('/pharmacy/sales', body);
+      toast(`Délivrance enregistrée — vente ${s.number} (${LABELS.prescription_status[s.prescription.status]})`);
+      onDone();
+    } catch (err) { setError(err); } finally { setBusy(false); }
+  };
+  return (
+    <Modal title={`Prescription ${pr.number}`} onClose={onClose} wide footer={null}>
+      <p className="muted small">{pr.patient_name} ({pr.patient_number}) · Dr {pr.prescriber || '—'} · {dateTime(pr.created_at)} · <Badge value={pr.status} map="prescription_status" />
+        {' '}<a href={`/api/consultations/prescriptions/${pr.id}/pdf`} target="_blank" rel="noreferrer">🖨 Ordonnance PDF</a></p>
+      <Table rows={pr.items} columns={[
+        { key: 'sel', label: '', render: (l) => <input type="checkbox" aria-label={`Délivrer la ligne ${l.line}`} checked={!!lines[l.line]?.selected} disabled={l.remaining_quantity === 0} onChange={(e) => set(l.line, 'selected', e.target.checked)} /> },
+        { key: 'drug_name', label: 'Prescrit', render: (l) => <><b>{l.drug_name}</b><div className="muted small">{[l.dosage, l.frequency, l.duration].filter(Boolean).join(' · ')}{l.instructions ? ` · ${l.instructions}` : ''}</div></> },
+        { key: 'q', label: 'Prescrit / délivré / reste', render: (l) => `${l.prescribed_quantity ?? '—'} / ${l.dispensed_quantity} / ${l.remaining_quantity ?? '—'}` },
+        { key: 'product', label: 'Produit délivré', render: (l) => (
+          <select value={lines[l.line]?.product_id || ''} disabled={!lines[l.line]?.selected} onChange={(e) => set(l.line, 'product_id', e.target.value)} aria-label="Produit">
+            <option value="">— Produit —</option>
+            {products?.filter((p) => p.active).map((p) => <option key={p.id} value={p.id} disabled={p.quantity === 0}>{p.name} (stock {p.quantity})</option>)}
+          </select>
+        ) },
+        { key: 'qty', label: 'Qté', render: (l) => <input type="number" min="1" max={l.remaining_quantity ?? undefined} style={{ width: 70 }} value={lines[l.line]?.quantity ?? ''} disabled={!lines[l.line]?.selected} onChange={(e) => set(l.line, 'quantity', e.target.value)} aria-label="Quantité" /> },
+      ]} />
+      {pr.items.some((l) => l.dispensations.length) && (
+        <>
+          <h3 className="small muted" style={{ margin: '12px 0 6px' }}>Délivrances</h3>
+          <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+            {pr.items.flatMap((l) => l.dispensations.map((d) => (
+              <li key={d.id} className={d.cancelled_at ? 'muted' : ''}>Ligne {l.line} : {d.quantity} × {d.product_name} — {d.dispensed_by_name}, {dateTime(d.dispensed_at)} ({d.sale_number}){d.cancelled_at ? ' — annulée' : ''}</li>
+            )))}
+          </ul>
+        </>
+      )}
+      <div className="form" style={{ marginTop: 12 }}>
+        {can('payments.create') && <label className="check"><input type="checkbox" checked={pay.now} onChange={(e) => setPay({ ...pay, now: e.target.checked })} /> Encaisser maintenant</label>}
+        {pay.now && <div className="form-grid">
+          <Field label="Mode"><select value={pay.method} onChange={(e) => setPay({ ...pay, method: e.target.value })}>{Object.entries(LABELS.method).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
+          {pay.method !== 'especes' && <Field label="Référence"><input value={pay.reference} onChange={(e) => setPay({ ...pay, reference: e.target.value })} /></Field>}
+          <RegisterSelect value={pay.register_id} onChange={(v) => setPay((x) => ({ ...x, register_id: v }))} required={pay.method === 'especes'} />
+        </div>}
+        <ErrorBox error={error} />
+        <div className="row"><span className="grow"><b>Total : {gnf(total)}</b></span>
+          <button className="btn ghost" onClick={onClose}>Fermer</button>
+          <button className="btn primary" disabled={!chosen.length || busy} onClick={submit}>Délivrer</button></div>
+      </div>
+    </Modal>
+  );
+}
+
+function PrescriptionsPanel() {
+  const [status, setStatus] = useState('a_delivrer');
+  const [q, setQ] = useState('');
+  const [page, setPage] = useState(1);
+  const [open, setOpen] = useState(null);
+  const { data, reload } = useFetch('/pharmacy/prescriptions', { status, q, page });
+  return (
+    <Card>
+      <div className="toolbar">
+        <input type="search" placeholder="N° d'ordonnance, patient…" value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }} />
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} aria-label="Statut">
+          <option value="a_delivrer">À délivrer</option><option value="delivree">Délivrées</option><option value="toutes">Toutes</option>
+        </select>
+      </div>
+      <Table rows={data?.items} onRowClick={(r) => setOpen(r.id)} empty="Aucune ordonnance" columns={[
+        { key: 'created_at', label: 'Date', render: (r) => dateTime(r.created_at) },
+        { key: 'number', label: 'N°' },
+        { key: 'patient_name', label: 'Patient', render: (r) => <>{r.patient_name}<div className="muted small">{r.patient_number}</div></> },
+        { key: 'prescriber', label: 'Prescripteur' },
+        { key: 'status', label: 'Statut', render: (r) => <Badge value={r.status} map="prescription_status" /> },
+        { key: 'last_dispensed_at', label: 'Dernière délivrance', render: (r) => dateTime(r.last_dispensed_at) },
+      ]} />
+      <Pagination page={page} total={data?.total} onChange={setPage} />
+      {open && <DispenseModal id={open} onClose={() => setOpen(null)} onDone={() => { setOpen(null); reload(); }} />}
+    </Card>
   );
 }
 
@@ -183,6 +289,7 @@ export function Pharmacy() {
       <Tabs value={tab} onChange={(t) => { setTab(t); setPage(1); }} tabs={[
         can('pharmacy.view') && { key: 'products', label: 'Produits' },
         can('pharmacy.sell') && { key: 'sale', label: 'Vente' },
+        can('pharmacy.sell') && { key: 'prescriptions', label: 'Ordonnances' },
         can('pharmacy.sell', 'payments.view') && { key: 'sales', label: 'Ventes' },
         can('pharmacy.view') && { key: 'movements', label: 'Mouvements' },
         can('stock.inventory') && { key: 'inventories', label: 'Inventaires' },
@@ -206,6 +313,7 @@ export function Pharmacy() {
         </Card>
       )}
       {tab === 'sale' && <SalePanel onDone={() => {}} />}
+      {tab === 'prescriptions' && <PrescriptionsPanel />}
       {tab === 'sales' && (
         <Card>
           <div className="toolbar"><PeriodFilter value={period} onChange={setPeriod} /></div>

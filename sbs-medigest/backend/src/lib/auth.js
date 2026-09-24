@@ -22,25 +22,40 @@ export async function loadPermissions(db, userId, role) {
 }
 
 /** Charge l'utilisateur à partir du jeton de session (cookie ou en-tête). */
-export async function userFromToken(token) {
+export async function userFromToken(token, opts) {
   if (!token) return null;
-  return userFromSessionId(sha256(token));
+  return userFromSessionId(sha256(token), opts);
 }
 
-/** Charge l'utilisateur à partir de l'identifiant (haché) d'une session valide. */
-export async function userFromSessionId(sid) {
+/**
+ * Charge l'utilisateur à partir de l'identifiant (haché) d'une session valide.
+ * Deux limites : durée absolue (expires_at) et inactivité (config.sessionIdleMinutes).
+ * `touch` : l'appel correspond à une action de l'utilisateur et prolonge la session ;
+ * les contrôles automatiques (temps réel, actualisation en arrière-plan) ne la prolongent pas.
+ */
+export async function userFromSessionId(sid, { touch = true } = {}) {
   if (!sid) return null;
   const { rows } = await query(
     `SELECT s.id AS session_id, s.last_seen_at, s.expires_at, u.id, u.username, u.first_name, u.last_name, u.site_id,
             u.must_change_password, u.status, u.job_title, u.employee_number,
-            r.id AS role_id, r.code AS role_code, r.name AS role_name, r.is_superadmin
+            r.id AS role_id, r.code AS role_code, r.name AS role_name, r.is_superadmin,
+            NOT EXISTS (SELECT 1 FROM user_mfa m WHERE m.user_id = u.id AND m.enabled_at IS NOT NULL) AS mfa_missing,
+            (now() - s.last_seen_at) > ($2 || ' minutes')::interval AS idle
      FROM sessions s JOIN users u ON u.id = s.user_id JOIN roles r ON r.id = u.role_id
      WHERE s.id = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
-    [sid],
+    [sid, String(config.sessionIdleMinutes)],
   );
   const row = rows[0];
   if (!row || row.status !== 'active') return null;
-  if (Date.now() - new Date(row.last_seen_at).getTime() > 60_000) {
+  if (row.idle) {
+    // Inactivité : la session est révoquée définitivement (et tracée)
+    const { rowCount } = await query('UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [sid]);
+    if (rowCount) {
+      await query(`INSERT INTO login_events (user_id, username, event) VALUES ($1, $2, 'expired')`, [row.id, row.username]).catch(() => {});
+    }
+    return null;
+  }
+  if (touch && Date.now() - new Date(row.last_seen_at).getTime() > 60_000) {
     query('UPDATE sessions SET last_seen_at = now() WHERE id = $1', [sid]).catch(() => {});
   }
   const permissions = await loadPermissions({ query }, row.id, { id: row.role_id, is_superadmin: row.is_superadmin });
@@ -48,6 +63,7 @@ export async function userFromSessionId(sid) {
     id: row.id,
     sessionId: row.session_id,
     sessionExpiresAt: new Date(row.expires_at).getTime(),
+    sessionLastSeenAt: new Date(row.last_seen_at).getTime(),
     username: row.username,
     firstName: row.first_name,
     lastName: row.last_name,
@@ -60,6 +76,8 @@ export async function userFromSessionId(sid) {
     roleName: row.role_name,
     superadmin: row.is_superadmin,
     mustChangePassword: row.must_change_password,
+    // propriétaire sans double authentification alors qu'elle est obligatoire : accès limité à sa configuration
+    mfaSetupRequired: !!(config.ownerMfaRequired && row.is_superadmin && row.mfa_missing),
     permissions,
   };
 }
@@ -83,19 +101,26 @@ export function cookieOptions() {
 /** Middleware : attache req.user si une session valide existe. */
 export async function attachUser(req, _res, next) {
   try {
-    req.user = await userFromToken(tokenFromRequest(req));
+    // En-tête X-SBS-Background : actualisation automatique, qui ne compte pas comme activité
+    req.user = await userFromToken(tokenFromRequest(req), { touch: !req.get('X-SBS-Background') });
     req.ctx.user = req.user;
     next();
   } catch (e) { next(e); }
 }
 
 const PASSWORD_FREE_PATHS = ['/api/auth/me', '/api/auth/logout', '/api/auth/change-password'];
+const MFA_SETUP_PATHS = [...PASSWORD_FREE_PATHS, '/api/auth/mfa', '/api/auth/mfa/setup', '/api/auth/mfa/confirm'];
 
 export function requireAuth(req, _res, next) {
   if (!req.user) return next(unauthorized());
   if (req.user.mustChangePassword && !PASSWORD_FREE_PATHS.includes(req.originalUrl.split('?')[0])) {
     const err = new HttpError(403, 'Vous devez changer votre mot de passe temporaire.');
     err.code = 'PASSWORD_CHANGE_REQUIRED';
+    return next(err);
+  }
+  if (req.user.mfaSetupRequired && !MFA_SETUP_PATHS.includes(req.originalUrl.split('?')[0])) {
+    const err = new HttpError(403, 'La double authentification est obligatoire pour le compte propriétaire : activez-la pour continuer.');
+    err.code = 'MFA_SETUP_REQUIRED';
     return next(err);
   }
   next();

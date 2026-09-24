@@ -14,6 +14,8 @@ export function setAuthHandlers(h) { onUnauthorized = h.onUnauthorized; onPasswo
 
 async function request(method, url, body, opts = {}) {
   const headers = { 'X-SBS-Client': 'web', ...(opts.headers || {}) };
+  // actualisation automatique : ne compte pas comme activité (expiration après inactivité)
+  if (opts.background) headers['X-SBS-Background'] = '1';
   let payload;
   if (body instanceof FormData) payload = body;
   else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
@@ -22,16 +24,16 @@ async function request(method, url, body, opts = {}) {
   if (!res.ok) {
     const err = new ApiError(res.status, data);
     if (res.status === 401 && !url.startsWith('/auth/login')) onUnauthorized();
-    if (err.code === 'PASSWORD_CHANGE_REQUIRED') onPasswordChange();
+    if (err.code === 'PASSWORD_CHANGE_REQUIRED' || err.code === 'MFA_SETUP_REQUIRED') onPasswordChange();
     throw err;
   }
   return data;
 }
 
 export const api = {
-  get: (url, params) => {
+  get: (url, params, opts) => {
     const qs = params ? '?' + new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '' && v != null)).toString() : '';
-    return request('GET', url + qs);
+    return request('GET', url + qs, undefined, opts);
   },
   post: (url, body, opts) => request('POST', url, body ?? {}, opts),
   put: (url, body) => request('PUT', url, body),

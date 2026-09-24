@@ -22,6 +22,8 @@ import labRoutes from './routes/lab.js';
 import appointmentRoutes from './routes/appointments.js';
 import dashboardRoutes from './routes/dashboard.js';
 import reportRoutes from './routes/reports.js';
+import invoiceRoutes from './routes/invoices.js';
+import documentRoutes from './routes/documents.js';
 import { search, alerts, auditRoutes, notifications, settings } from './routes/misc.js';
 import { pool } from './db/pool.js';
 
@@ -83,6 +85,8 @@ export function createApp() {
   app.use('/api/appointments', appointmentRoutes);
   app.use('/api/dashboard', dashboardRoutes);
   app.use('/api/reports', reportRoutes);
+  app.use('/api/invoices', invoiceRoutes);
+  app.use('/api/documents', documentRoutes);
   app.use('/api/search', search);
   app.use('/api/alerts', alerts);
   app.use('/api/audit', auditRoutes);
@@ -91,9 +95,20 @@ export function createApp() {
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Ressource inconnue')));
 
   // Application web (build du frontend)
-  if (config.staticDir && fs.existsSync(config.staticDir)) {
-    app.use(express.static(config.staticDir, { index: false, maxAge: '1h' }));
-    app.get('*', (_req, res) => res.sendFile(path.join(config.staticDir, 'index.html')));
+  const staticDir = config.staticDir; // figé à la création de l'application
+  if (staticDir && fs.existsSync(staticDir)) {
+    app.use(express.static(staticDir, {
+      index: false,
+      maxAge: '1h',
+      setHeaders(res, file) {
+        const name = path.basename(file);
+        // fichiers versionnés par empreinte : cache long ; service worker, manifeste, pages : toujours revalidés
+        if (file.includes(`${path.sep}assets${path.sep}`)) res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        else if (['sw.js', 'manifest.webmanifest', 'index.html', 'offline.html'].includes(name)) res.set('Cache-Control', 'no-cache');
+        if (name === 'sw.js') res.set('Service-Worker-Allowed', '/');
+      },
+    }));
+    app.get('*', (_req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(staticDir, 'index.html'), { cacheControl: false }); });
   }
 
   // eslint-disable-next-line no-unused-vars
@@ -101,6 +116,7 @@ export function createApp() {
     let status = err.status || 500;
     let message = err.message;
     if (err.code === '23505') { status = 409; message = 'Doublon : cet élément existe déjà.'; }
+    else if (err.code === 'SB409') { status = 409; } // règle métier garantie par la base (ex. caisse clôturée)
     else if (err.code === '23503') { status = 400; message = 'Référence invalide (élément lié introuvable).'; }
     else if (err.code === '23514') { status = 400; message = 'Valeur non autorisée.'; }
     else if (err.code === 'LIMIT_FILE_SIZE') { status = 400; message = 'Fichier trop volumineux (8 Mo max).'; }

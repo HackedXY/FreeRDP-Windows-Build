@@ -12,11 +12,21 @@ function OpenSession({ s, onClosed }) {
   const { can } = useAuth();
   const [declared, setDeclared] = useState('');
   const [justification, setJustification] = useState('');
+  const [carry, setCarry] = useState('');
+  const [note, setNote] = useState('');
   const [error, setError] = useState(null);
   const diff = declared === '' ? null : Number(declared) - s.expected_balance;
+  // argent laissé dans le tiroir pour la session suivante ; le reste est retiré (coffre, banque…)
+  const carryValue = carry === '' ? Number(declared || 0) : Number(carry);
+  const withdrawn = declared === '' ? 0 : Number(declared) - carryValue;
   const close = async (e) => {
     e.preventDefault(); setError(null);
-    try { onClosed(await api.post('/cash/close', { session_id: s.id, declared_balance: Number(declared), justification: justification || null })); } catch (err) { setError(err); }
+    try {
+      onClosed(await api.post('/cash/close', {
+        session_id: s.id, declared_balance: Number(declared), justification: justification || null,
+        carry_over: carryValue, withdrawal_note: withdrawn > 0 ? note : null,
+      }));
+    } catch (err) { setError(err); }
   };
   return (
     <Card title={`${s.register_name} — ${s.number}`} actions={<Badge tone="ok">Ouverte</Badge>}>
@@ -37,6 +47,12 @@ function OpenSession({ s, onClosed }) {
           </div>
           {diff !== null && diff !== 0 && <Field label="Justification de l'écart" required><textarea rows={2} value={justification} onChange={(e) => setJustification(e.target.value)} required minLength={5} /></Field>}
           {diff !== null && diff !== 0 && <div className="alert-box warn">Un écart sera signalé à l'administrateur.</div>}
+          {declared !== '' && (
+            <div className="form-grid">
+              <Field label="Laissé en caisse pour la prochaine session" hint="Report contrôlé à la prochaine ouverture de cette caisse."><input type="number" min="0" max={declared} placeholder={declared} value={carry} onChange={(e) => setCarry(e.target.value)} /></Field>
+              {withdrawn > 0 && <Field label={`Destination du retrait (${gnf(withdrawn)})`} required><input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Coffre, dépôt bancaire, remis au propriétaire…" required minLength={3} /></Field>}
+            </div>
+          )}
           <ErrorBox error={error} />
           <div className="form-actions"><button className="btn primary" disabled={declared === ''}>Clôturer la caisse</button></div>
         </form>
@@ -55,16 +71,19 @@ export function Cash() {
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [page, setPage] = useState(1);
   const { data: sessions, reload: reloadS } = useFetch('/cash/sessions', { ...periodParams(period), discrepancy: onlyDiff ? '1' : '', page });
-  const [open, setOpen] = useState({ register_id: '', opening_balance: '' });
+  const [open, setOpen] = useState({ register_id: '', opening_balance: '', justification: '' });
   const [error, setError] = useState(null);
   useRealtime((e) => { if (e === 'stats') reload(); });
   const openRegisters = new Set((current || []).map((s) => s.register_id));
   const closedRegisters = (registers || []).filter((r) => !openRegisters.has(r.id));
+  const chosenRegister = closedRegisters.find((r) => String(r.id) === String(open.register_id)) || closedRegisters[0];
+  const expectedOpening = chosenRegister?.expected_opening ?? null;
+  const openingGap = expectedOpening != null && open.opening_balance !== '' && Number(open.opening_balance) !== Number(expectedOpening);
   const doOpen = async (e) => {
     e.preventDefault(); setError(null);
     try {
-      await api.post('/cash/open', { register_id: Number(open.register_id || closedRegisters[0]?.id), opening_balance: Number(open.opening_balance) });
-      toast('Caisse ouverte'); setOpen({ register_id: '', opening_balance: '' }); reload(); reloadS();
+      await api.post('/cash/open', { register_id: Number(open.register_id || closedRegisters[0]?.id), opening_balance: Number(open.opening_balance), justification: open.justification || null });
+      toast('Caisse ouverte'); setOpen({ register_id: '', opening_balance: '', justification: '' }); reload(); reloadS();
     } catch (err) { setError(err); }
   };
   return (
@@ -75,7 +94,8 @@ export function Cash() {
         <Card title="Ouvrir une caisse">
           <form className="form-grid" onSubmit={doOpen}>
             {closedRegisters.length > 1 && <Field label="Caisse"><select value={open.register_id} onChange={(e) => setOpen({ ...open, register_id: e.target.value })}>{closedRegisters.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>}
-            <Field label="Solde initial (fond de caisse)" required><input type="number" min="0" value={open.opening_balance} onChange={(e) => setOpen({ ...open, opening_balance: e.target.value })} required /></Field>
+            <Field label="Solde initial (fond de caisse)" required hint={expectedOpening != null ? `Report de la dernière clôture : ${gnf(expectedOpening)}` : null}><input type="number" min="0" value={open.opening_balance} placeholder={expectedOpening ?? ''} onChange={(e) => setOpen({ ...open, opening_balance: e.target.value })} required /></Field>
+            {openingGap && <Field label="Justification de l'écart de report" required><input value={open.justification} onChange={(e) => setOpen({ ...open, justification: e.target.value })} required minLength={5} /></Field>}
             <div className="field" style={{ justifyContent: 'flex-end' }}><button className="btn primary">Ouvrir la caisse</button></div>
           </form>
           <ErrorBox error={error} />
@@ -120,7 +140,14 @@ export function CashSession() {
         <Stat icon="🏦" label="Caisse théorique" value={gnf(s.expected_balance)} />
         {s.declared_balance != null && <Stat icon="🧮" label="Caisse déclarée" value={gnf(s.declared_balance)} />}
         {s.discrepancy != null && <Stat icon="⚖️" label="Écart" value={gnf(s.discrepancy)} tone={s.discrepancy ? 'danger' : ''} sub={s.justification} />}
+        {s.carry_over != null && <Stat icon="➡️" label="Reporté à la session suivante" value={gnf(s.carry_over)} sub={s.withdrawn ? `Retiré ${gnf(s.withdrawn)} — ${s.withdrawal_note}` : null} />}
       </div>
+      {s.expected_opening != null && (
+        <div className={`alert-box ${s.expected_opening !== s.opening_balance ? 'warn' : 'info'}`}>
+          Report attendu de la clôture précédente : {gnf(s.expected_opening)} — solde d'ouverture déclaré : {gnf(s.opening_balance)}
+          {s.opening_justification ? ` — justification : ${s.opening_justification}` : ''}
+        </div>
+      )}
       {s.payments_by_method?.length > 0 && (
         <Card title="Encaissements par mode (tous modes)">
           <dl className="kv">{s.payments_by_method.flatMap((m) => [<dt key={`a${m.method}`}>{LABELS.method[m.method]}</dt>, <dd key={`b${m.method}`}>{gnf(m.total)} <span className="muted small">({m.count})</span></dd>])}</dl>

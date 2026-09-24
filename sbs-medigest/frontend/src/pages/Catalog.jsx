@@ -11,7 +11,9 @@ function ItemForm({ kind, item, onClose, onSaved }) {
     e.preventDefault(); setError(null);
     const body = kind === 'acts'
       ? { code: values.code || null, name: values.name, category: values.category || 'soin', description: values.description || null, price: Number(values.price), duration_minutes: values.duration_minutes ? Number(values.duration_minutes) : null, active: values.active === 'true' }
-      : { code: values.code || null, name: values.name, category: values.category || null, price: Number(values.price), unit: values.unit || null, reference_range: values.reference_range || null, active: values.active === 'true' };
+      : { code: values.code || null, name: values.name, category: values.category || null, price: Number(values.price), unit: values.unit || null, reference_range: values.reference_range || null,
+        ref_min: values.ref_min === '' || values.ref_min == null ? null : Number(String(values.ref_min).replace(',', '.')),
+        ref_max: values.ref_max === '' || values.ref_max == null ? null : Number(String(values.ref_max).replace(',', '.')), active: values.active === 'true' };
     const base = kind === 'acts' ? '/acts' : '/lab/exams';
     try { onSaved(item ? await api.put(`${base}/${item.id}`, body) : await api.post(base, body)); } catch (err) { setError(err); }
   };
@@ -27,7 +29,9 @@ function ItemForm({ kind, item, onClose, onSaved }) {
           <Field label="Prix (GNF)" required><input type="number" min="0" {...bind('price')} required /></Field>
           {kind === 'acts' ? <Field label="Durée (min)"><input type="number" min="0" {...bind('duration_minutes')} /></Field> : <>
             <Field label="Unité"><input {...bind('unit')} /></Field>
-            <Field label="Valeurs de référence"><input {...bind('reference_range')} /></Field>
+            <Field label="Valeurs de référence (texte)"><input {...bind('reference_range')} placeholder="ex. Négatif, < 1/80" /></Field>
+            <Field label="Référence min (numérique)" hint="Sert à signaler automatiquement les valeurs anormales."><input inputMode="decimal" {...bind('ref_min')} /></Field>
+            <Field label="Référence max (numérique)"><input inputMode="decimal" {...bind('ref_max')} /></Field>
           </>}
           <Field label="Statut"><select {...bind('active')}><option value="true">Actif</option><option value="false">Inactif</option></select></Field>
         </div>
@@ -54,7 +58,7 @@ export default function Catalog() {
       <Card>
         <Table rows={data} onRowClick={editable ? (r) => setModal({ item: r }) : undefined} columns={[
           { key: 'code', label: 'Code' }, { key: 'name', label: 'Nom', render: (r) => <b>{r.name}</b> }, { key: 'category', label: 'Catégorie' },
-          ...(tab === 'acts' ? [{ key: 'duration_minutes', label: 'Durée', render: (r) => r.duration_minutes ? `${r.duration_minutes} min` : '—' }] : [{ key: 'reference_range', label: 'Référence' }]),
+          ...(tab === 'acts' ? [{ key: 'duration_minutes', label: 'Durée', render: (r) => r.duration_minutes ? `${r.duration_minutes} min` : '—' }] : [{ key: 'reference_range', label: 'Référence', render: (r) => (r.ref_min != null || r.ref_max != null ? `${r.ref_min ?? '…'} – ${r.ref_max ?? '…'} ${r.unit || ''}` : r.reference_range || '—') }]),
           { key: 'active', label: 'Statut', render: (r) => r.active ? <Badge tone="ok">Actif</Badge> : <Badge tone="muted">Inactif</Badge> },
           { key: 'price', label: 'Prix', align: 'right', render: (r) => gnf(r.price) },
         ]} />

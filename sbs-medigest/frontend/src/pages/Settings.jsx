@@ -39,8 +39,14 @@ export default function Settings() {
     <>
       <PageHeader title="Paramètres" />
       <div className="grid-2">
-        <Section title="Cabinet (en-tête des reçus)" k="clinic" initial={s.clinic} onSaved={saved} fields={[
-          ['name', 'Nom affiché'], ['full_name', 'Raison sociale'], ['address', 'Adresse'], ['phone', 'Téléphone'], ['currency', 'Devise'],
+        <Section title="Cabinet (en-tête des documents)" k="clinic" initial={s.clinic} onSaved={saved} fields={[
+          ['name', 'Nom affiché'], ['full_name', 'Raison sociale'], ['address', 'Adresse'], ['city', 'Ville (« Fait à … »)'], ['phone', 'Téléphone'], ['currency', 'Devise'],
+          ['registration', 'N° d\'autorisation / d\'agrément du cabinet'], ['tax_id', 'NIF'], ['rccm', 'RCCM'],
+          ['legal_mentions', 'Mention de pied de page des documents'],
+        ]} />
+        <Section title="Contrôles de caisse" k="finance" initial={s.finance} onSaved={saved} fields={[
+          ['cash_expense_daily_limit', 'Plafond journalier des dépenses en espèces (GNF)', 'number'],
+          ['unpaid_sale_alert_hours', 'Alerte vente de pharmacie impayée après (heures)', 'number'],
         ]} />
         <Section title="Contrôles financiers" k="finance" initial={s.finance} onSaved={saved} fields={[
           ['expense_validation_threshold', 'Validation admin des dépenses à partir de (GNF)', 'number'],
@@ -49,8 +55,9 @@ export default function Settings() {
           ['cash_tolerance', 'Écart de caisse toléré sans alerte (GNF)', 'number'],
         ]} />
         <Section title="Sécurité" k="security" initial={s.security} onSaved={saved} fields={[
-          ['max_failed_logins', 'Échecs avant verrouillage', 'number'],
-          ['lock_minutes', 'Durée du verrouillage (minutes)', 'number'],
+          ['max_failed_logins', 'Échecs tolérés par poste avant ralentissement', 'number'],
+          ['lock_minutes', 'Fenêtre / durée du ralentissement (minutes)', 'number'],
+          ['account_lock_threshold', 'Échecs toutes sources avant blocage temporaire du compte', 'number'],
           ['failed_login_alert_threshold', 'Alerte après N échecs (30 min)', 'number'],
         ]} />
         <Section title="Stock" k="stock" initial={s.stock} onSaved={saved} fields={[['expiry_warning_days', 'Alerte expiration (jours avant)', 'number']]} />

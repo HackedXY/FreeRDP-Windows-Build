@@ -20,8 +20,8 @@ const DEFAULT_EXAMS = [
   ['GE', 'Goutte épaisse (paludisme)', 'Parasitologie', 25000, null, 'Négatif'],
   ['TDR', 'TDR paludisme', 'Parasitologie', 15000, null, 'Négatif'],
   ['NFS', 'Numération formule sanguine', 'Hématologie', 60000, null, null],
-  ['GLY', 'Glycémie à jeun', 'Biochimie', 20000, 'g/L', '0,70 – 1,10'],
-  ['CREA', 'Créatininémie', 'Biochimie', 35000, 'mg/L', '6 – 12'],
+  ['GLY', 'Glycémie à jeun', 'Biochimie', 20000, 'g/L', '0,70 – 1,10', 0.70, 1.10],
+  ['CREA', 'Créatininémie', 'Biochimie', 35000, 'mg/L', '6 – 12', 6, 12],
   ['WID', 'Sérodiagnostic de Widal', 'Sérologie', 40000, null, '< 1/80'],
   ['HIV', 'Sérologie VIH', 'Sérologie', 30000, null, 'Négatif'],
   ['ECBU', 'ECBU', 'Bactériologie', 60000, null, null],
@@ -49,6 +49,12 @@ export async function seed({ log = console.log } = {}) {
         await db.query('INSERT INTO role_permissions (role_id, permission_code) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING', [role.id, r.permissions]);
       }
     }
+    // Marque la base de production (bloque définitivement le jeu de démonstration)
+    if (config.isProd) {
+      await db.query(
+        `INSERT INTO settings (key, value) VALUES ('deployment', jsonb_build_object('mode', 'production', 'marked_at', now()))
+         ON CONFLICT (key) DO NOTHING`);
+    }
     const { rows: sites } = await db.query('SELECT id FROM sites LIMIT 1');
     if (!sites.length) {
       await db.query(`INSERT INTO sites (name, address) VALUES ('Cabinet Médical SBS', 'Siguiri, Guinée')`);
@@ -62,8 +68,8 @@ export async function seed({ log = console.log } = {}) {
     }
     const { rows: exams } = await db.query('SELECT 1 FROM lab_exam_types LIMIT 1');
     if (!exams.length) {
-      for (const [code, name, category, price, unit, range] of DEFAULT_EXAMS) {
-        await db.query('INSERT INTO lab_exam_types (code, name, category, price, unit, reference_range) VALUES ($1,$2,$3,$4,$5,$6)', [code, name, category, price, unit, range]);
+      for (const [code, name, category, price, unit, range, min = null, max = null] of DEFAULT_EXAMS) {
+        await db.query('INSERT INTO lab_exam_types (code, name, category, price, unit, reference_range, ref_min, ref_max) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [code, name, category, price, unit, range, min, max]);
       }
     }
     const { rows: admins } = await db.query('SELECT 1 FROM users LIMIT 1');

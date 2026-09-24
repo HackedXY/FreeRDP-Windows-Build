@@ -287,3 +287,25 @@ export function BarChart({ data, series, height = 180, format = gnf }) {
 export function Money({ value, tone }) {
   return <span className={`money ${tone || ''}`}>{gnf(value)}</span>;
 }
+
+/**
+ * Sélection explicite de la caisse lorsque plusieurs caisses sont ouvertes
+ * (paiements, remboursements, dépenses, ventes). Avec une seule caisse ouverte,
+ * rien n'est affiché : le serveur utilise cette caisse.
+ */
+export function RegisterSelect({ value, onChange, required = true, label = 'Caisse' }) {
+  const { data: registers } = useFetch('/cash/open-registers');
+  const list = registers || [];
+  useEffect(() => {
+    if (value && list.length && !list.some((r) => String(r.register_id) === String(value))) onChange('');
+  }, [registers]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (list.length < 2) return null;
+  return (
+    <Field label={label} required={required} hint="Plusieurs caisses sont ouvertes : choisissez celle qui est concernée.">
+      <select value={value || ''} onChange={(e) => onChange(e.target.value)} required={required}>
+        <option value="">— Choisir la caisse —</option>
+        {list.map((r) => <option key={r.session_id} value={r.register_id}>{r.register_name} ({r.number} · {r.opened_by_name})</option>)}
+      </select>
+    </Field>
+  );
+}

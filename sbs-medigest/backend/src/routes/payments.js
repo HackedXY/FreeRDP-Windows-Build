@@ -9,7 +9,7 @@ import { notify, raiseAlert } from '../lib/notify.js';
 import { nextNumber } from '../lib/numbering.js';
 import { getSettings } from '../lib/settings.js';
 import { fmtGNF, paging, addPeriod, refreshPaymentStatus } from '../lib/helpers.js';
-import { requireOpenSession, cashMovement } from './cash.js';
+import { requireOpenSession, sessionForNonCash, lockSessionState, cashMovement } from './cash.js';
 
 const router = Router();
 
@@ -145,12 +145,9 @@ export async function createPayment(db, req, input) {
   if (d.discount > gross) throw badRequest('La remise ne peut dépasser le montant.');
   const net = gross - d.discount;
 
-  let session = null;
-  if (d.method === 'especes') session = await requireOpenSession(db, d.register_id ?? null);
-  else {
-    const { rows } = await db.query(`SELECT * FROM cash_sessions WHERE status = 'ouverte' ORDER BY id LIMIT 1`);
-    session = rows[0] || null;
-  }
+  const session = d.method === 'especes'
+    ? await requireOpenSession(db, d.register_id ?? null)
+    : await sessionForNonCash(db, d.register_id ?? null);
 
   const number = await nextNumber(db, 'payment', 'PAY');
   const receipt = await nextNumber(db, 'receipt', 'REC');
@@ -201,12 +198,17 @@ router.put('/:id', requirePerm('payments.update'), ah(async (req, res) => {
     amount: z.coerce.number().int().min(0).optional(),
     method: z.enum(['especes', 'orange_money', 'mtn_money', 'virement', 'autre']).optional(),
     reference: z.string().trim().max(100).optional().nullable(),
+    register_id: z.coerce.number().int().positive().optional().nullable(),
     reason: reasonSchema,
   }), req.body);
   const out = await tx(async (db) => {
     const { rows: [before] } = await db.query('SELECT * FROM payments WHERE id = $1 FOR UPDATE', [id]);
     if (!before) throw notFound('Paiement introuvable');
     if (before.status !== 'valide') throw badRequest('Seul un paiement valide peut être modifié.');
+    // Période clôturée : un paiement rattaché à une caisse clôturée n'est plus modifiable
+    if (before.cash_session_id && await lockSessionState(db, before.cash_session_id) !== 'ouverte') {
+      throw badRequest('La caisse de ce paiement est clôturée : utilisez un remboursement.');
+    }
     const newNet = d.amount ?? before.amount;
     const newMethod = d.method ?? before.method;
     const newGross = newNet + before.discount;
@@ -218,9 +220,7 @@ router.put('/:id', requirePerm('payments.update'), ah(async (req, res) => {
     const cashBefore = before.method === 'especes' ? before.amount : 0;
     const cashAfter = newMethod === 'especes' ? newNet : 0;
     if (cashBefore !== cashAfter) {
-      const { rows: [s] } = await db.query('SELECT status FROM cash_sessions WHERE id = $1', [before.cash_session_id]);
-      if (before.method === 'especes' && s?.status !== 'ouverte') throw badRequest('La caisse de ce paiement est clôturée : utilisez un remboursement.');
-      const session = before.method === 'especes' ? { id: before.cash_session_id } : await requireOpenSession(db);
+      const session = before.method === 'especes' ? { id: before.cash_session_id } : await requireOpenSession(db, d.register_id ?? null);
       const delta = cashAfter - cashBefore;
       await cashMovement(db, req, {
         sessionId: session.id, direction: delta > 0 ? 'in' : 'out', category: 'correction', amount: Math.abs(delta),
@@ -252,19 +252,26 @@ router.put('/:id', requirePerm('payments.update'), ah(async (req, res) => {
 }));
 
 async function reversePayment(req, id, kind) {
-  const { reason } = parse(z.object({ reason: reasonSchema }), req.body);
+  const { reason, register_id: registerId } = parse(z.object({
+    reason: reasonSchema,
+    register_id: z.coerce.number().int().positive().optional().nullable(),
+  }), req.body);
   return tx(async (db) => {
     const { rows: [before] } = await db.query('SELECT * FROM payments WHERE id = $1 FOR UPDATE', [id]);
     if (!before) throw notFound('Paiement introuvable');
     if (before.status !== 'valide') throw badRequest('Ce paiement est déjà annulé ou remboursé.');
+    // Annulation : uniquement tant que la caisse du paiement est ouverte (verrou contre une clôture concurrente),
+    // quel que soit le mode de paiement. Après clôture, seul le remboursement est possible.
+    if (kind === 'cancel' && before.cash_session_id && await lockSessionState(db, before.cash_session_id) !== 'ouverte') {
+      throw badRequest('La caisse de ce paiement est clôturée : effectuez un remboursement.');
+    }
     if (before.method === 'especes' && before.amount > 0) {
       let sessionId;
       if (kind === 'cancel') {
-        const { rows: [s] } = await db.query('SELECT status FROM cash_sessions WHERE id = $1', [before.cash_session_id]);
-        if (s?.status !== 'ouverte') throw badRequest('La caisse de ce paiement est clôturée : effectuez un remboursement.');
+        if (!before.cash_session_id) throw badRequest('Paiement en espèces sans caisse : effectuez un remboursement.');
         sessionId = before.cash_session_id;
       } else {
-        sessionId = (await requireOpenSession(db)).id;
+        sessionId = (await requireOpenSession(db, registerId ?? null)).id;
       }
       await cashMovement(db, req, {
         sessionId, direction: 'out', category: kind === 'cancel' ? 'annulation' : 'remboursement', amount: before.amount,
@@ -315,6 +322,7 @@ router.get('/:id/receipt.pdf', requirePerm('payments.view', 'payments.create'), 
   doc.font('Helvetica-Bold').fontSize(12).text(clinic.name, { align: 'center' });
   doc.font('Helvetica').fontSize(7).text(clinic.address, { align: 'center' });
   if (clinic.phone) doc.text(`Tél. ${clinic.phone}`, { align: 'center' });
+  if (clinic.tax_id) doc.text(`NIF : ${clinic.tax_id}${clinic.rccm ? ` — RCCM : ${clinic.rccm}` : ''}`, { align: 'center' });
   line();
   doc.font('Helvetica-Bold').fontSize(10).text('REÇU DE PAIEMENT', { align: 'center' });
   if (py.status !== 'valide') doc.fillColor('#b91c1c').text(py.status === 'annule' ? '*** ANNULÉ ***' : '*** REMBOURSÉ ***', { align: 'center' }).fillColor('black');

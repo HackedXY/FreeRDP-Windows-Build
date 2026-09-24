@@ -18,8 +18,11 @@ const stamp = (d = new Date()) => d.toISOString().replace(/[-:]/g, '').replace('
  * @param {string} o.target        BACKUP_TARGET (rclone:… ou dir:…)
  * @param {string} o.publicKeyPem  clé publique de chiffrement
  * @param {number} [o.keepDays]    rétention distante
+ * @param {boolean} [o.prune]      suppression des anciens jeux par le serveur. En production, désactivée par défaut :
+ *                                 la rétention est confiée au stockage (verrouillage d'objets + cycle de vie), et le
+ *                                 compte de stockage du serveur n'a PAS le droit de supprimer (voir docs/SAUVEGARDES.md).
  */
-export async function runBackup({ databaseUrl, target, publicKeyPem, keepDays = 30, isProd = false, allowDir = false, now = new Date(), extraSteps = [] }) {
+export async function runBackup({ databaseUrl, target, publicKeyPem, keepDays = 30, prune = true, isProd = false, allowDir = false, now = new Date(), extraSteps = [] }) {
   const db = new pg.Client({ connectionString: databaseUrl });
   await db.connect();
   const { rows: [run] } = await db.query(`INSERT INTO backup_runs (host) VALUES ($1) RETURNING id`, [os.hostname()]);
@@ -30,6 +33,8 @@ export async function runBackup({ databaseUrl, target, publicKeyPem, keepDays = 
     // contrôles préalables : échouer avant de lancer pg_dump
     const storage = openStorage(target, { isProd, allowDir });
     if (!publicKeyPem) throw new Error('Clé publique de sauvegarde absente (BACKUP_PUBLIC_KEY_FILE)');
+    // La clé privée de déchiffrement ne doit jamais se trouver sur le serveur
+    if (/PRIVATE KEY/.test(publicKeyPem)) throw new Error('Clé PRIVÉE fournie au service de sauvegarde : interdit — seule la clé publique va sur le serveur');
     const fp = keyFingerprint(publicKeyPem);
 
     // 1. Dump de la base, chiffré sans jamais écrire de clair sur disque
@@ -61,10 +66,16 @@ export async function runBackup({ databaseUrl, target, publicKeyPem, keepDays = 
     const manifestSha = crypto.createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
     await storage.put(manifestPath, `${setName}/manifest.json`);
 
-    // 3. Rétention (ne supprime que des sauvegardes complètes, jamais la plus récente)
-    const sets = await storage.listSets();
-    const limit = stamp(new Date(now.getTime() - keepDays * 86400000));
-    for (const s of sets.slice(0, -1)) if (s.slice(4) < limit) await storage.removeSet(s);
+    // 3. Rétention (ne supprime que des sauvegardes complètes, jamais la plus récente).
+    //    Un refus de suppression (stockage en écriture seule / verrouillé) n'est pas un échec de sauvegarde.
+    if (prune) {
+      const sets = await storage.listSets();
+      const limit = stamp(new Date(now.getTime() - keepDays * 86400000));
+      for (const s of sets.slice(0, -1)) {
+        if (s.slice(4) >= limit) continue;
+        try { await storage.removeSet(s); } catch (e) { console.warn(`Rétention : suppression de ${s} refusée par le stockage (${sanitize(e.message)})`); }
+      }
+    }
 
     await db.query(
       `UPDATE backup_runs SET status = 'success', finished_at = now(), set_name = $2, target_kind = $3, db_bytes = $4,

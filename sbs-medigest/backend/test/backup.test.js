@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import pg from 'pg';
+import { spawnSync } from 'node:child_process';
 import { resetDb, adminAgent, employee, pool, ownerPool, closePools } from './helpers.js';
 const { runBackup } = await import('../src/backup/backup.js');
 const { runRestore } = await import('../src/backup/restore.js');
@@ -142,7 +143,7 @@ test('rétention : les jeux plus anciens que la durée de conservation sont supp
 test('garde-fous : rôle applicatif sans droit d\'écriture sur le journal des sauvegardes, cible locale refusée en production, secrets masqués', async () => {
   await assert.rejects(pool.query(`INSERT INTO backup_runs (status) VALUES ('success')`), (e) => e.code === '42501');
   assert.throws(() => openStorage(`dir:${remote}`, { isProd: true }), /refusée en production/);
-  const s = sanitize('connexion postgres://sbs_backup:SuperSecret1@db:5432/sbs impossible; password=Other2');
+  const s = sanitize('connexion postgres://sbs_backup:SuperSecret1@db:5432/sbs impossible; password=Other2'); // check-secrets: exemple (valeur fictive pour tester le masquage)
   assert.ok(!s.includes('SuperSecret1') && !s.includes('Other2'));
 });
 
@@ -160,4 +161,27 @@ test('adaptateur rclone (configuration par variables d\'environnement) : sauvega
     delete process.env.RCLONE_CONFIG_SBSTEST_TYPE;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ------------------------------------------------------------------ phase 4 : stockage protégé, clé privée hors serveur
+test('stockage en écriture seule : sans suppression par le serveur (production), les anciens jeux sont conservés', async () => {
+  const old = await backup({ now: new Date(Date.now() - 60 * 86400000) });
+  await backup({ keepDays: 30, prune: false });
+  assert.ok(fs.existsSync(path.join(remote, old.set)), 'rétention confiée au stockage (verrouillage + cycle de vie)');
+  const worker = fs.readFileSync(new URL('../src/backup/worker.js', import.meta.url), 'utf8');
+  assert.match(worker, /BACKUP_REMOTE_PRUNE === 'on' : env\.NODE_ENV !== 'production'/, 'suppression désactivée par défaut en production');
+});
+
+test('clé privée jamais sur le serveur : refusée par la sauvegarde et par le service', async () => {
+  await assert.rejects(backup({ publicKeyPem: privPem }), /PRIVÉE/);
+  const { rows: [r] } = await pool.query(`SELECT status, error FROM backup_runs ORDER BY id DESC LIMIT 1`);
+  assert.equal(r.status, 'failed');
+  assert.ok(!r.error.includes('BEGIN'), 'aucun extrait de clé dans le journal');
+  const w = spawnSync(process.execPath, ['src/backup/worker.js', '--once'], {
+    encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, BACKUP_DATABASE_URL: BACKUP_URL, BACKUP_TARGET: `dir:${remote}`, BACKUP_PRIVATE_KEY: privPem },
+  });
+  assert.equal(w.status, 2);
+  assert.match(w.stderr, /CLÉ PRIVÉE/);
+  assert.ok(!w.stderr.includes('BEGIN'), 'la clé n\'est pas affichée');
 });

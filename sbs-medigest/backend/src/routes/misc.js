@@ -162,11 +162,17 @@ settings.get('/', requirePerm('settings.manage'), ah(async (_req, res) => {
 }));
 
 const settingSchemas = {
-  clinic: z.object({ name: z.string().min(2), full_name: z.string().optional(), address: z.string().optional(), phone: z.string().optional(), currency: z.string().optional() }),
-  security: z.object({ max_failed_logins: z.coerce.number().int().min(3).max(20), lock_minutes: z.coerce.number().int().min(1).max(1440), failed_login_alert_threshold: z.coerce.number().int().min(1).max(20) }),
+  clinic: z.object({
+    name: z.string().min(2), full_name: z.string().optional(), address: z.string().optional(), phone: z.string().optional(), currency: z.string().optional(),
+    city: z.string().max(80).optional(), registration: z.string().max(120).optional(), tax_id: z.string().max(60).optional(),
+    rccm: z.string().max(60).optional(), legal_mentions: z.string().max(300).optional(),
+  }),
+  security: z.object({ max_failed_logins: z.coerce.number().int().min(3).max(20), lock_minutes: z.coerce.number().int().min(1).max(1440), failed_login_alert_threshold: z.coerce.number().int().min(1).max(20), account_lock_threshold: z.coerce.number().int().min(5).max(200).optional() }),
   finance: z.object({
     expense_validation_threshold: z.coerce.number().int().min(0), unusual_expense_threshold: z.coerce.number().int().min(0),
     discount_alert_percent: z.coerce.number().min(0).max(100), cash_tolerance: z.coerce.number().int().min(0),
+    cash_expense_daily_limit: z.coerce.number().int().min(0).optional(),
+    unpaid_sale_alert_hours: z.coerce.number().int().min(1).max(720).optional(),
   }),
   stock: z.object({ expiry_warning_days: z.coerce.number().int().min(1).max(365) }),
   expense_categories: z.array(z.string().trim().min(2)).min(1),

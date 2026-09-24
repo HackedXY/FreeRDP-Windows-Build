@@ -15,7 +15,7 @@ import { setActor, roleInfo, isPrivilegedRole, targetProfile, denyEscalation } f
 
 const router = Router();
 
-const USER_COLUMNS = `u.id, u.employee_number, u.first_name, u.last_name, u.phone, u.email, u.job_title,
+const USER_COLUMNS = `u.id, u.employee_number, u.first_name, u.last_name, u.phone, u.email, u.job_title, u.professional_id,
   u.username, u.status, u.must_change_password, u.last_login_at, u.created_at, u.updated_at, u.site_id,
   u.locked_until, r.id AS role_id, r.name AS role_name, r.code AS role_code`;
 
@@ -37,6 +37,8 @@ const userSchema = z.object({
   phone: z.string().trim().max(30).optional().nullable(),
   email: z.string().trim().email().max(150).optional().nullable().or(z.literal('')),
   job_title: z.string().trim().max(100).optional().nullable(),
+  // n° d'inscription à l'Ordre / autorisation d'exercice (imprimé sur ordonnances et certificats)
+  professional_id: z.string().trim().max(60).optional().nullable(),
   role_id: z.coerce.number().int().positive(),
   username: z.string().trim().min(3).max(50).regex(/^[a-zA-Z0-9._-]+$/, 'lettres, chiffres, . _ - uniquement'),
   password: z.string().max(200).optional().nullable(),
@@ -112,10 +114,10 @@ router.post('/', requirePerm('users.manage'), ah(async (req, res) => {
     const empNo = await nextNumber(db, 'employee', 'EMP', { yearly: false, pad: 3 });
     const { rows: [u] } = await db.query(
       `INSERT INTO users (site_id, employee_number, first_name, last_name, phone, email, job_title, role_id, username,
-         password_hash, must_change_password, status, created_by)
-       VALUES ((SELECT min(id) FROM sites), $1,$2,$3,$4,$5,$6,$7,$8,$9, TRUE, $10, $11) RETURNING id`,
+         password_hash, must_change_password, status, created_by, professional_id)
+       VALUES ((SELECT min(id) FROM sites), $1,$2,$3,$4,$5,$6,$7,$8,$9, TRUE, $10, $11, $12) RETURNING id`,
       [empNo, data.first_name, data.last_name, data.phone || null, data.email || null, data.job_title || null,
-        data.role_id, data.username, hash, data.status || 'active', req.user.id],
+        data.role_id, data.username, hash, data.status || 'active', req.user.id, data.professional_id || null],
     );
     if (data.permission_overrides?.length) await saveOverrides(db, u.id, data.permission_overrides);
     await audit(db, req.ctx, {
@@ -156,7 +158,7 @@ router.put('/:id', requirePerm('users.manage'), ah(async (req, res) => {
       const { rows: dup } = await db.query('SELECT 1 FROM users WHERE lower(username) = lower($1) AND id <> $2', [data.username, id]);
       if (dup.length) throw conflict('Cet identifiant est déjà utilisé.');
     }
-    const fields = ['first_name', 'last_name', 'phone', 'email', 'job_title', 'role_id', 'username', 'status'];
+    const fields = ['first_name', 'last_name', 'phone', 'email', 'job_title', 'professional_id', 'role_id', 'username', 'status'];
     const sets = []; const vals = [];
     for (const f of fields) if (data[f] !== undefined) { vals.push(data[f] === '' ? null : data[f]); sets.push(`${f} = $${vals.length}`); }
     if (sets.length) {

@@ -4,6 +4,7 @@ import { useAuth } from '../auth.jsx';
 import { api } from '../api.js';
 import { connectRealtime, disconnectRealtime, useRealtime, isConnected } from '../realtime.js';
 import { useToast } from './ui.jsx';
+import { ErrorBoundary } from './ErrorBoundary.jsx';
 import { gnf, dateTime } from '../format.js';
 
 const NAV = [
@@ -18,6 +19,7 @@ const NAV = [
   { to: '/laboratoire', label: 'Laboratoire', icon: '🧪', perm: ['lab.view', 'lab.request', 'lab.results'] },
   { section: 'Finances' },
   { to: '/paiements', label: 'Paiements', icon: '💳', perm: ['payments.view', 'payments.create'] },
+  { to: '/factures', label: 'Factures', icon: '🧾', perm: ['payments.view'] },
   { to: '/caisse', label: 'Caisse', icon: '🏦', perm: ['cash.operate', 'cash.view_all'] },
   { to: '/depenses', label: 'Dépenses', icon: '💸', perm: ['expenses.view'] },
   { section: 'Pharmacie & stock' },
@@ -27,6 +29,7 @@ const NAV = [
   { to: '/employes', label: 'Employés', icon: '👨‍⚕️', perm: ['users.view', 'users.manage'] },
   { to: '/roles', label: 'Rôles & permissions', icon: '🔐', perm: ['roles.manage'] },
   { to: '/audit', label: "Journal d'audit", icon: '📜', perm: ['audit.view'] },
+  { to: '/verification', label: 'Vérifier un document', icon: '🔎', perm: ['patients.view', 'payments.view', 'pharmacy.sell', 'lab.view'] },
   { to: '/actes', label: 'Actes & tarifs', icon: '🏷️', perm: ['acts.manage', 'lab.manage'] },
   { to: '/parametres', label: 'Paramètres', icon: '⚙️', perm: ['settings.manage'] },
 ];
@@ -85,11 +88,11 @@ function Notifications() {
   const [data, setData] = useState({ items: [], unread: 0 });
   const toast = useToast();
   const nav = useNavigate();
-  const load = () => api.get('/notifications').then(setData).catch(() => {});
+  const load = (background = false) => api.get('/notifications', null, { background }).then(setData).catch(() => {});
   useEffect(() => { load(); }, []);
   useRealtime((event, p) => {
     if (event === 'notification') {
-      load();
+      load(true);
       toast(`${p.icon || '🔔'} ${p.title}${p.body ? ` — ${p.body}` : ''}`, p.type === 'alert' ? 'warn' : 'ok');
     }
   });
@@ -157,8 +160,8 @@ export default function Layout() {
     setLive(isConnected());
     return () => disconnectRealtime();
   }, []);
-  const loadAlerts = () => can('alerts.view') && api.get('/alerts', { status: 'open', limit: 1 }).then((r) => setOpenAlerts(r.total)).catch(() => {});
-  useEffect(() => { loadAlerts(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const loadAlerts = (background = true) => can('alerts.view') && api.get('/alerts', { status: 'open', limit: 1 }, { background }).then((r) => setOpenAlerts(r.total)).catch(() => {});
+  useEffect(() => { loadAlerts(false); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useRealtime((event) => {
     if (event === 'connect') setLive(true);
     if (event === 'disconnect') setLive(false);
@@ -187,7 +190,7 @@ export default function Layout() {
           <Notifications />
           <UserMenu />
         </header>
-        <main className="content"><Outlet /></main>
+        <main className="content"><ErrorBoundary resetKey={loc.pathname}><Outlet /></ErrorBoundary></main>
       </div>
     </div>
   );

@@ -57,7 +57,7 @@ function EmployeeForm({ employee, onClose, onSaved }) {
   const submit = async (e) => {
     e.preventDefault(); setError(null);
     const body = {
-      first_name: values.first_name, last_name: values.last_name, phone: values.phone || null, email: values.email || '', job_title: values.job_title || null,
+      first_name: values.first_name, last_name: values.last_name, phone: values.phone || null, email: values.email || '', job_title: values.job_title || null, professional_id: values.professional_id || null,
       role_id: Number(values.role_id), username: values.username, status: values.status, permission_overrides: values.permission_overrides,
     };
     if (!employee && values.password) body.password = values.password;
@@ -72,6 +72,7 @@ function EmployeeForm({ employee, onClose, onSaved }) {
           <Field label="Téléphone"><input type="tel" {...bind('phone')} /></Field>
           <Field label="E-mail"><input type="email" {...bind('email')} /></Field>
           <Field label="Fonction"><input {...bind('job_title')} placeholder="Médecin généraliste, caissière…" /></Field>
+          <Field label="N° d'inscription à l'Ordre" hint="Médecins : imprimé sur les ordonnances et certificats."><input {...bind('professional_id')} /></Field>
           <Field label="Rôle" required><select {...bind('role_id')} required disabled={isSelf}><option value="">—</option>{roles?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>
           <Field label="Identifiant de connexion" required><input {...bind('username')} required autoComplete="off" pattern="[a-zA-Z0-9._\-]{3,50}" /></Field>
           {!employee && <Field label="Mot de passe temporaire" hint="Laisser vide pour en générer un automatiquement."><input {...bind('password')} autoComplete="new-password" /></Field>}

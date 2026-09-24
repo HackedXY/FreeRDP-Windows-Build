@@ -75,8 +75,9 @@ cp ./cles-sauvegarde/backup-public.pem secrets/     # puis ranger backup-private
 # 3. Test immédiat
 docker compose run --rm backup node src/backup/worker.js --once
 ```
-Donner au compte de stockage des droits **d'écriture sans suppression** lorsque le fournisseur le permet (verrouillage d'objets /
-versionnage), afin qu'une compromission du serveur ne puisse pas effacer l'historique distant.
+Donner au compte de stockage des droits **d'écriture sans suppression** (verrouillage d'objets + cycle de vie) : une
+compromission du serveur ne peut alors pas effacer l'historique distant. Stratégie complète, rétention et procédure de
+restauration : **[docs/SAUVEGARDES.md](docs/SAUVEGARDES.md)**.
 
 **Restauration (procédure testée automatiquement).**
 ```bash
@@ -104,7 +105,7 @@ la renommer (ou pointer `DATABASE_URL` dessus), redémarrer. Tester une restaura
 | 11 | Rendez-vous | Calendrier 7 jours, recherche, détection de conflit de créneau, annulation motivée, **rappels** (appel / SMS en un clic) |
 | 13–14 | Paiements & reçus | N° de transaction et de reçu uniques, Espèces / Orange Money / MTN / virement / autre (référence obligatoire pour le mobile money), paiements partiels, remises (permission dédiée), **reçu imprimable, PDF (format ticket 80 mm) et partage** |
 | 15 | Caisse | Ouverture avec solde initial, grand livre des espèces, caisse théorique calculée, clôture avec montant déclaré, **écart + justification obligatoire**, historique des clôtures ; plusieurs caisses possibles |
-| 16–17 | Journal d'audit | Utilisateur, date/heure, action, élément, ancienne/nouvelle valeur, motif, IP. L'application se connecte avec un rôle PostgreSQL **non propriétaire** qui ne peut qu'**ajouter** des entrées (pas de modification, suppression, vidage ni désactivation des triggers). Chaque entrée est **chaînée (SHA-256)** et **signée (HMAC, clé hors base)** : « Vérifier l'intégrité » détecte une insertion forgée ou une réécriture faite avec les droits propriétaire, même si la chaîne a été recalculée. *Limite assumée : un attaquant disposant à la fois des droits propriétaire de la base et de la clé HMAC pourrait réécrire le journal sans être détecté — ces deux secrets ne doivent jamais se trouver ensemble hors du service de migration.* |
+| 16–17 | Journal d'audit | Utilisateur, date/heure, action, élément, ancienne/nouvelle valeur, motif, IP. L'application se connecte avec un rôle PostgreSQL **non propriétaire** qui ne peut qu'**ajouter** des entrées (pas de modification, suppression, vidage ni désactivation des triggers). Chaque entrée est **chaînée (SHA-256)** et **signée (HMAC, clé hors base)** : « Vérifier l'intégrité » détecte une insertion forgée ou une réécriture faite avec les droits propriétaire, même si la chaîne a été recalculée. *Limite assumée : un attaquant disposant à la fois des droits propriétaire de la base et de la clé HMAC pourrait réécrire le journal sans être détecté. Ces deux secrets sont donc séparés : le service de migration (droits propriétaire) ne reçoit pas la clé HMAC, et l'application (clé HMAC) n'a pas les droits propriétaire (voir docs/RECUPERATION-PROPRIETAIRE.md pour l'unique exception, tracée).* |
 | 18, 29 | Alertes & notifications | Écart de caisse, remboursement, annulation, paiement modifié, remise importante, dépense inhabituelle, stock épuisé/faible, expiration proche/dépassée, correction d'inventaire, échecs de connexion répétés, accès non autorisé, changement de prix / de droits / de paramètres. Workflow « à vérifier → résolue / classée » avec note. Notifications in-app en temps réel |
 | 19–21 | Pharmacie, stock, inventaire | Produits, lots et dates d'expiration, sorties **FEFO**, mouvements avec stock avant/après et auteur, justification des pertes, ventes (avec ou sans encaissement immédiat), inventaire théorique/réel avec justification des écarts |
 | 22 | Laboratoire | Catalogue tarifé, demande par le médecin, file du laboratoire (urgences en tête), saisie des résultats, notification du prescripteur, paiement |

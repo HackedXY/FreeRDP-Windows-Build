@@ -2,13 +2,13 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, useToast, PeriodFilter, periodParams, Money, ReasonModal } from '../components/ui.jsx';
+import { PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, useToast, PeriodFilter, periodParams, Money, ReasonModal, RegisterSelect } from '../components/ui.jsx';
 import { date, dateTime, gnf, todayISO } from '../format.js';
 
 function ExpenseForm({ onClose, onSaved }) {
   const { expenseCategories, can } = useAuth();
   const { data: suppliers } = useFetch(can('suppliers.view', 'expenses.create') ? '/suppliers' : null);
-  const [f, setF] = useState({ category: expenseCategories[0] || '', amount: '', reason: '', beneficiary: '', supplier_id: '', expense_date: todayISO(), pay_from_cash: false });
+  const [f, setF] = useState({ category: expenseCategories[0] || '', amount: '', reason: '', beneficiary: '', supplier_id: '', expense_date: todayISO(), pay_from_cash: false, register_id: '' });
   const [file, setFile] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -32,6 +32,7 @@ function ExpenseForm({ onClose, onSaved }) {
         <Field label="Motif" required><textarea rows={2} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} required minLength={3} /></Field>
         <Field label="Justificatif (photo ou PDF)"><input type="file" accept="image/*,application/pdf" capture="environment" onChange={(e) => setFile(e.target.files[0])} /></Field>
         {(can('expenses.disburse') || can('cash.operate')) && <label className="check"><input type="checkbox" checked={f.pay_from_cash} onChange={(e) => setF({ ...f, pay_from_cash: e.target.checked })} /> Payer immédiatement en espèces depuis la caisse (si aucune validation n'est requise)</label>}
+        {f.pay_from_cash && <RegisterSelect value={f.register_id} onChange={(v) => setF((x) => ({ ...x, register_id: v }))} />}
         <p className="hint">Les dépenses au-delà du seuil défini nécessitent la validation de l'administrateur.</p>
         <ErrorBox error={error} />
         <div className="form-actions"><button type="button" className="btn ghost" onClick={onClose}>Annuler</button><button className="btn primary" disabled={busy}>Enregistrer</button></div>
@@ -46,6 +47,7 @@ function ExpenseDetail({ e, onClose, onChanged }) {
   const [comment, setComment] = useState('');
   const [error, setError] = useState(null);
   const [cancel, setCancel] = useState(false);
+  const [disburseRegister, setDisburseRegister] = useState('');
   const act = async (fn, msg) => { setError(null); try { onChanged(await fn()); toast(msg); } catch (err) { setError(err); } };
   return (
     <Modal title={`Dépense ${e.number}`} onClose={onClose}>
@@ -71,7 +73,7 @@ function ExpenseDetail({ e, onClose, onChanged }) {
         </div>
       )}
       <div className="form-actions" style={{ marginTop: 12 }}>
-        {e.status === 'validee' && !e.disbursed && (can('expenses.disburse') || can('cash.operate')) && <button className="btn primary" onClick={() => act(() => api.post(`/expenses/${e.id}/disburse`), 'Dépense décaissée')}>💸 Décaisser de la caisse</button>}
+        {e.status === 'validee' && !e.disbursed && (can('expenses.disburse') || can('cash.operate')) && <><RegisterSelect value={disburseRegister} onChange={setDisburseRegister} /><button className="btn primary" onClick={() => act(() => api.post(`/expenses/${e.id}/disburse`, { register_id: disburseRegister ? Number(disburseRegister) : null }), 'Dépense décaissée')}>💸 Décaisser de la caisse</button></>}
         {!e.disbursed && e.status !== 'annulee' && can('expenses.validate') && <button className="btn ghost" onClick={() => setCancel(true)}>Annuler la dépense</button>}
       </div>
       <ErrorBox error={error} />

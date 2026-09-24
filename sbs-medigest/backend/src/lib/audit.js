@@ -10,11 +10,21 @@ const ACTION_LABELS = {
   'auth.login_failed': 'Échec de connexion',
   'auth.password_changed': 'Changement de mot de passe',
   'access.denied': 'Tentative d\'accès non autorisé',
+  'auth.mfa_setup': 'Double authentification : activation démarrée',
+  'auth.mfa_enabled': 'Double authentification activée',
+  'auth.mfa_renewed': 'Double authentification reconfigurée',
+  'auth.owner_recovery': 'Récupération du compte propriétaire',
+  'auth.mfa_disabled': 'Double authentification désactivée',
+  'auth.mfa_recovery_used': 'Connexion avec un code de récupération',
+  'auth.mfa_recovery_regenerated': 'Codes de récupération régénérés',
+  'medical.read': 'Consultation de données médicales',
+  'document.print': 'Édition d\'un document',
+  'document.verify': 'Vérification d\'un document',
 };
 export const actionLabel = (a) => ACTION_LABELS[a] || a;
 
 // Actions trop fréquentes / peu utiles pour le fil d'activité du tableau de bord
-const NOT_IN_FEED = new Set(['auth.login', 'auth.logout', 'notifications.read']);
+const NOT_IN_FEED = new Set(['auth.login', 'auth.logout', 'notifications.read', 'medical.read', 'document.print', 'document.verify']);
 
 /**
  * @param db  client pg (dans une transaction) ou pool

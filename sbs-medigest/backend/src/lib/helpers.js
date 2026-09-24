@@ -1,4 +1,5 @@
 import { can } from './auth.js';
+import { resolveUnpaidSaleAlert } from './receivables.js';
 
 /** Pagination standard ?page=&limit= */
 export function paging(req, def = 50, max = 200) {
@@ -40,10 +41,32 @@ export const fmtGNF = (n) => `${Math.round(Number(n) || 0).toLocaleString('fr-FR
 
 export { can };
 
+/**
+ * Série journalière recettes / dépenses / consultations sur [from, to) : un seul passage
+ * agrégé par table (et non trois sous-requêtes par jour, coûteuses sur une longue période).
+ * $1 = début (date), $2 = fin exclue (date).
+ */
+export const DAILY_SERIES_SQL = `
+  WITH days AS (SELECT generate_series($1::date, $2::date - 1, interval '1 day')::date AS day),
+  pay AS (SELECT created_at::date AS day, sum(amount) AS revenue FROM payments
+          WHERE status = 'valide' AND created_at >= $1::date AND created_at < $2::date GROUP BY 1),
+  exp AS (SELECT expense_date AS day, sum(amount) AS expenses FROM expenses
+          WHERE status = 'validee' AND expense_date >= $1::date AND expense_date < $2::date GROUP BY 1),
+  con AS (SELECT consulted_at::date AS day, count(*)::int AS consultations FROM consultations
+          WHERE status <> 'annulee' AND consulted_at >= $1::date AND consulted_at < $2::date GROUP BY 1)
+  SELECT days.day, coalesce(pay.revenue, 0) AS revenue, coalesce(exp.expenses, 0) AS expenses, coalesce(con.consultations, 0) AS consultations
+  FROM days LEFT JOIN pay USING (day) LEFT JOIN exp USING (day) LEFT JOIN con USING (day) ORDER BY days.day`;
+
 /** Met à jour le statut de paiement d'un élément facturable. */
 export async function refreshPaymentStatus(db, sourceType, sourceId) {
   const table = { consultation: 'consultations', lab_request: 'lab_requests', pharmacy_sale: 'pharmacy_sales' }[sourceType];
   if (!table || !sourceId) return;
+  if (sourceType === 'pharmacy_sale') {
+    const { rows: [s] } = await db.query(
+      `SELECT (coalesce(sum(gross_amount), 0) >= (SELECT amount FROM pharmacy_sales WHERE id = $1)) AS paid
+       FROM payments WHERE source_type = 'pharmacy_sale' AND source_id = $1 AND status = 'valide'`, [sourceId]);
+    if (s?.paid) await resolveUnpaidSaleAlert(db, sourceId, 'Résolue automatiquement : vente soldée');
+  }
   await db.query(
     `UPDATE ${table} t SET paid_amount = p.total,
        payment_status = CASE WHEN p.total <= 0 THEN 'non_payee' WHEN p.total >= t.amount THEN 'payee' ELSE 'partielle' END

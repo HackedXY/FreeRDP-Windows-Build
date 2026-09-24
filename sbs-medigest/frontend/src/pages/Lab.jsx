@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { useRealtime } from '../realtime.js';
 import { PageHeader, Card, Table, Pagination, useFetch, Modal, Field, ErrorBox, Badge, Empty, PatientPicker, ReasonModal, useToast, PeriodFilter, periodParams } from '../components/ui.jsx';
-import { dateTime, gnf, age } from '../format.js';
+import { dateTime, gnf, age, LABELS } from '../format.js';
 
 export function LabRequestModal({ patient: initial, consultationId, onClose, onSaved }) {
   const { data: exams } = useFetch('/lab/exams');
@@ -87,28 +87,45 @@ export function LabDetail() {
   const [items, setItems] = useState([]);
   const [err, setErr] = useState(null);
   const [cancel, setCancel] = useState(false);
-  useEffect(() => { if (r) setItems(r.items.map((i) => ({ ...i }))); }, [r]);
+  // anomalie : « auto » = calculée d'après les valeurs de référence ; oui / non = forcée par le laboratoire
+  useEffect(() => { if (r) setItems(r.items.map((i) => ({ ...i, abnormal_mode: i.abnormal_manual ? (i.abnormal ? 'oui' : 'non') : 'auto' }))); }, [r]);
   if (error) return <ErrorBox error={error} />;
   if (!r) return <Empty>Chargement…</Empty>;
-  const editable = can('lab.results') && r.status !== 'annulee';
+  const editable = can('lab.results') && r.status !== 'annulee' && (!r.validated_at || can('lab.validate'));
   const upd = (i, k, v) => setItems(items.map((it, j) => j === i ? { ...it, [k]: v } : it));
+  const numOrNull = (v) => (v === '' || v === null || v === undefined ? null : Number(String(v).replace(',', '.')));
   const save = async (complete) => {
     setErr(null);
     try {
-      setData(await api.put(`/lab/requests/${id}/results`, { complete, items: items.map((i) => ({ id: i.id, result_value: i.result_value || null, result_text: i.result_text || null, unit: i.unit || null, reference_range: i.reference_range || null, abnormal: !!i.abnormal })) }));
-      toast(complete ? 'Résultats validés — prescripteur notifié' : 'Résultats enregistrés');
+      setData(await api.put(`/lab/requests/${id}/results`, {
+        complete,
+        items: items.map((i) => ({
+          id: i.id, result_value: i.result_value || null, result_text: i.result_text || null, unit: i.unit || null,
+          reference_range: i.reference_range || null, ref_min: numOrNull(i.ref_min), ref_max: numOrNull(i.ref_max),
+          abnormal: i.abnormal_mode === 'auto' ? null : i.abnormal_mode === 'oui',
+        })),
+      }));
+      toast(complete ? 'Résultats enregistrés — prescripteur notifié' : 'Résultats enregistrés');
     } catch (e) { setErr(e); }
   };
+  const validate = async () => {
+    setErr(null);
+    try { setData(await api.post(`/lab/requests/${id}/validate`)); toast('Résultats validés'); } catch (e) { setErr(e); }
+  };
+  const refText = (it) => (it.ref_min != null || it.ref_max != null ? `${it.ref_min ?? '…'} – ${it.ref_max ?? '…'}` : it.reference_range || '—');
   return (
     <>
       <PageHeader title={`Examens ${r.number}`} subtitle={<><Link to={`/patients/${r.patient_id}`}>{r.patient_name}</Link> · {r.patient_number} · {r.patient_sex || ''} {age(r.patient_birth_date)} · demandé par {r.requested_by_name} le {dateTime(r.created_at)}</>}>
         <Badge value={r.status} map="lab_status" /> <Badge value={r.payment_status} map="payment_status" />
         {r.priority === 'urgente' && <Badge tone="danger">URGENT</Badge>}
         {can('payments.create') && r.payment_status !== 'payee' && r.status !== 'annulee' && <Link className="btn" to={`/paiements/nouveau?source=lab_request&id=${r.id}`}>💳 Encaisser {gnf(r.amount - r.paid_amount)}</Link>}
-        <button className="btn ghost" onClick={() => window.print()}>🖨️ Imprimer</button>
+        {r.validated_at ? <Badge tone="ok">Validé</Badge> : r.status === 'terminee' && <Badge tone="warn">Non validé</Badge>}
+        {r.status === 'terminee' && !r.results_restricted && <a className="btn ghost" href={`/api/lab/requests/${r.id}/report.pdf`} target="_blank" rel="noreferrer">🖨️ Compte rendu PDF</a>}
+        {r.status === 'terminee' && !r.validated_at && can('lab.validate') && <button className="btn primary" onClick={validate}>✔ Valider les résultats</button>}
         {r.status !== 'terminee' && r.status !== 'annulee' && r.paid_amount === 0 && (can('lab.request') || can('lab.results')) && <button className="btn ghost" onClick={() => setCancel(true)}>Annuler</button>}
       </PageHeader>
       {r.notes && <div className="alert-box info">Renseignements cliniques : {r.notes}</div>}
+      {r.validated_at && <div className="alert-box ok">Résultats validés par {r.validated_by_name} le {dateTime(r.validated_at)}.{editable ? ' Toute correction lèvera la validation (nouvelle validation nécessaire).' : ''}</div>}
       <Card title="Résultats">
         <div className="table-wrap">
           <table className="table">
@@ -117,10 +134,23 @@ export function LabDetail() {
               {items.map((it, i) => (
                 <tr key={it.id}>
                   <td data-label="Examen"><b>{it.name}</b><div className="muted small">{it.technician_name && `${it.technician_name} · ${dateTime(it.result_at)}`}</div></td>
-                  <td data-label="Résultat">{editable ? <input value={it.result_value || ''} onChange={(e) => upd(i, 'result_value', e.target.value)} /> : <b className={it.abnormal ? 'money neg' : ''}>{it.result_value || '—'}</b>}</td>
+                  <td data-label="Résultat">{editable ? <input value={it.result_value || ''} onChange={(e) => upd(i, 'result_value', e.target.value)} /> : <b className={it.abnormal ? 'money neg' : ''}>{it.result_value || '—'}</b>}
+                    {it.flag && <div className="small money neg">{LABELS.lab_flag[it.flag]}</div>}</td>
                   <td data-label="Unité">{editable ? <input value={it.unit || ''} onChange={(e) => upd(i, 'unit', e.target.value)} style={{ width: 80 }} /> : it.unit}</td>
-                  <td data-label="Référence">{editable ? <input value={it.reference_range || ''} onChange={(e) => upd(i, 'reference_range', e.target.value)} /> : it.reference_range}</td>
-                  <td data-label="Anormal">{editable ? <input type="checkbox" checked={!!it.abnormal} onChange={(e) => upd(i, 'abnormal', e.target.checked)} /> : it.abnormal ? '⚠️ Oui' : 'Non'}</td>
+                  <td data-label="Référence">{editable ? (
+                    <div className="stack" style={{ gap: 4 }}>
+                      <div className="row" style={{ flexWrap: 'nowrap' }}>
+                        <input inputMode="decimal" placeholder="min" aria-label="Minimum" value={it.ref_min ?? ''} onChange={(e) => upd(i, 'ref_min', e.target.value)} style={{ width: 70 }} />–
+                        <input inputMode="decimal" placeholder="max" aria-label="Maximum" value={it.ref_max ?? ''} onChange={(e) => upd(i, 'ref_max', e.target.value)} style={{ width: 70 }} />
+                      </div>
+                      <input placeholder="texte (ex. Négatif)" aria-label="Référence textuelle" value={it.reference_range || ''} onChange={(e) => upd(i, 'reference_range', e.target.value)} />
+                    </div>
+                  ) : refText(it)}</td>
+                  <td data-label="Anormal">{editable ? (
+                    <select value={it.abnormal_mode} onChange={(e) => upd(i, 'abnormal_mode', e.target.value)} aria-label="Anomalie">
+                      <option value="auto">Auto{it.abnormal != null ? ` (${it.abnormal ? 'oui' : 'non'})` : ''}</option><option value="oui">Oui</option><option value="non">Non</option>
+                    </select>
+                  ) : it.abnormal ? '⚠️ Oui' : it.abnormal === false ? 'Non' : '—'}</td>
                   <td data-label="Commentaire">{editable ? <input value={it.result_text || ''} onChange={(e) => upd(i, 'result_text', e.target.value)} /> : it.result_text}</td>
                 </tr>
               ))}
@@ -130,7 +160,7 @@ export function LabDetail() {
         <ErrorBox error={err} />
         {editable && <div className="form-actions" style={{ marginTop: 12 }}>
           <button className="btn" onClick={() => save(false)}>Enregistrer (en cours)</button>
-          <button className="btn primary" onClick={() => save(true)}>✔ Valider les résultats</button>
+          <button className="btn primary" onClick={() => save(true)}>✔ Terminer la saisie</button>
         </div>}
       </Card>
       {cancel && <ReasonModal title="Annuler la demande" danger onClose={() => setCancel(false)} onConfirm={async (reason) => { await api.post(`/lab/requests/${id}/cancel`, { reason }); setData(await api.get(`/lab/requests/${id}`)); }} />}

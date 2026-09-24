@@ -12,12 +12,19 @@ const cfg = {
   target: env.BACKUP_TARGET,
   publicKeyPem: env.BACKUP_PUBLIC_KEY_FILE ? fs.readFileSync(env.BACKUP_PUBLIC_KEY_FILE, 'utf8') : null,
   keepDays: Number(env.BACKUP_KEEP_DAYS || 30),
+  // production : rétention gérée par le stockage (verrouillage + cycle de vie), le serveur ne supprime rien
+  prune: env.BACKUP_REMOTE_PRUNE ? env.BACKUP_REMOTE_PRUNE === 'on' : env.NODE_ENV !== 'production',
   hour: Number(env.BACKUP_HOUR ?? 2),
   isProd: env.NODE_ENV === 'production',
   allowDir: env.BACKUP_ALLOW_DIR_TARGET === 'true',
   uploadsDir: env.UPLOAD_DIR || '/data/uploads',
 };
 if (!cfg.databaseUrl) { console.error('BACKUP_DATABASE_URL requis'); process.exit(2); }
+// Garde-fou : aucune clé privée ne doit être fournie au serveur (variables ou fichier de clé)
+if (Object.values(env).some((v) => typeof v === 'string' && v.includes('PRIVATE KEY')) || /PRIVATE KEY/.test(cfg.publicKeyPem || '')) {
+  console.error('Refus de démarrer : une CLÉ PRIVÉE a été fournie au service de sauvegarde. Seule la clé publique va sur le serveur.');
+  process.exit(2);
+}
 
 async function once() {
   const t0 = Date.now();

@@ -32,6 +32,8 @@ if [[ ! -f .env ]]; then ko ".env absent (lancer deploy/scripts/generate-secrets
   for p in "${PWS[@]}"; do [[ ${#p} -ge 20 && "$p" =~ ^[A-Za-z0-9]+$ ]] || { ko "mot de passe PostgreSQL trop court ou avec caractères non sûrs pour une URL"; break; }; done
   [[ "${BACKUP_TARGET:-}" == rclone:* ]] && ok "sauvegardes vers un stockage distant" || ko "BACKUP_TARGET doit être rclone:… (hors serveur)"
   [[ -z "${ADMIN_PASSWORD:-}" ]] && warn "ADMIN_PASSWORD vide : le mot de passe initial sera écrit dans les journaux du service migrate"
+  [[ "${BACKUP_REMOTE_PRUNE:-off}" == "on" ]] && warn "BACKUP_REMOTE_PRUNE=on : le serveur supprimera d'anciennes sauvegardes (recommandé : off + verrouillage d'objets, docs/SAUVEGARDES.md)" || ok "le serveur ne supprime aucune sauvegarde (rétention par le stockage)"
+  IDLE="${SESSION_IDLE_MINUTES:-30}"; [[ "$IDLE" =~ ^[0-9]+$ && "$IDLE" -ge 5 && "$IDLE" -le 120 ]] && ok "déconnexion après ${IDLE} min d'inactivité" || warn "SESSION_IDLE_MINUTES=${IDLE} : valeur inhabituelle (5 à 120 recommandé)"
 fi
 
 echo "== Secrets de sauvegarde"
@@ -55,6 +57,14 @@ if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active
   ok "pare-feu ufw actif"
   ufw status | grep -E "^(5432|4000|5173)" && ko "ports internes ouverts dans ufw (5432/4000/5173)" || ok "aucun port interne ouvert (5432/4000/5173)"
 else warn "pare-feu ufw inactif (voir deploy/scripts/setup-vps.sh)"; fi
+
+echo "== Séparation des secrets"
+CFG=$(docker compose config 2>/dev/null)
+if [[ -n "$CFG" ]]; then
+  n=$(printf '%s\n' "$CFG" | grep -c 'AUDIT_HMAC_KEY:'); [[ "$n" -eq 1 ]] && ok "clé HMAC d'audit transmise au seul service applicatif" || ko "AUDIT_HMAC_KEY présente dans $n services (attendu : 1, app)"
+  n=$(printf '%s\n' "$CFG" | grep -c 'DATA_ENCRYPTION_KEY:'); [[ "$n" -eq 1 ]] && ok "clé de chiffrement médical transmise au seul service applicatif" || ko "DATA_ENCRYPTION_KEY présente dans $n services (attendu : 1, app)"
+  printf '%s\n' "$CFG" | grep -q 'OWNER_MFA_REQUIRED: "true"' && ok "double authentification obligatoire pour le propriétaire" || ko "OWNER_MFA_REQUIRED doit valoir true"
+fi
 
 echo "== Configuration Docker Compose"
 docker compose config -q 2>/dev/null && ok "docker-compose.yml valide avec ce .env" || ko "docker compose config en erreur"

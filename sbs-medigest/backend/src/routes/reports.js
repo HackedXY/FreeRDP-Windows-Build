@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { query } from '../db/pool.js';
 import { ah, notFound, badRequest } from '../lib/errors.js';
 import { requirePerm } from '../lib/auth.js';
-import { periodRange } from '../lib/helpers.js';
+import { periodRange, DAILY_SERIES_SQL } from '../lib/helpers.js';
 
 const router = Router();
 
@@ -59,11 +59,7 @@ router.get('/summary', requirePerm('reports.view'), ah(async (req, res) => {
              u.first_name || ' ' || u.last_name AS closed_by_name
            FROM cash_sessions s LEFT JOIN users u ON u.id = s.closed_by
            WHERE s.status = 'cloturee' AND s.closed_at >= $1 AND s.closed_at < $2 ORDER BY s.closed_at`, p),
-    query(`SELECT d::date AS day,
-             (SELECT coalesce(sum(amount), 0) FROM payments WHERE status = 'valide' AND created_at >= d AND created_at < d + interval '1 day') AS revenue,
-             (SELECT coalesce(sum(amount), 0) FROM expenses WHERE status = 'validee' AND expense_date = d::date) AS expenses,
-             (SELECT count(*)::int FROM consultations WHERE status <> 'annulee' AND consulted_at >= d AND consulted_at < d + interval '1 day') AS consultations
-           FROM generate_series($1::date, $2::date - 1, interval '1 day') d ORDER BY d`, p),
+    query(DAILY_SERIES_SQL, p),
     query(`SELECT coalesce(u.first_name || ' ' || u.last_name, 'Non assigné') AS doctor, count(*)::int AS count, coalesce(sum(c.amount), 0) AS total
            FROM consultations c LEFT JOIN users u ON u.id = c.doctor_id
            WHERE c.status <> 'annulee' AND c.consulted_at >= $1 AND c.consulted_at < $2 GROUP BY 1 ORDER BY count DESC`, p),

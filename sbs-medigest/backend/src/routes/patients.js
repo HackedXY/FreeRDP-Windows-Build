@@ -8,7 +8,7 @@ import { notify } from '../lib/notify.js';
 import { encrypt, decrypt } from '../lib/crypto.js';
 import { nextNumber } from '../lib/numbering.js';
 import { paging } from '../lib/helpers.js';
-import { canClinical, canLabResults, canPrescriptions, canAppointmentDetails, decJson } from '../lib/medical.js';
+import { canClinical, canLabResults, canPrescriptions, canAppointmentDetails, decJson, logMedicalRead } from '../lib/medical.js';
 import { presentPrescription } from './consultations.js';
 
 const router = Router();
@@ -65,6 +65,9 @@ router.get('/', requirePerm('patients.view'), ah(async (req, res) => {
 router.get('/:id', requirePerm('patients.view'), ah(async (req, res) => {
   const { rows } = await query('SELECT * FROM patients WHERE id = $1', [Number(req.params.id)]);
   if (!rows[0]) throw notFound('Patient introuvable');
+  if (can(req.user, 'patients.view_medical')) {
+    await logMedicalRead(req, { patientId: rows[0].id, patientNumber: rows[0].patient_number, access: 'dossier' });
+  }
   res.json(presentPatient(rows[0], req.user));
 }));
 
@@ -92,7 +95,7 @@ router.get('/:id/history', requirePerm('patients.view'), ah(async (req, res) => 
   }
   if (canPrescriptions(u)) {
     const { rows } = await query(
-      `SELECT pr.id, pr.created_at, pr.notes, pr.items, u.first_name || ' ' || u.last_name AS prescriber
+      `SELECT pr.id, pr.number, pr.status, pr.created_at, pr.notes, pr.items, u.first_name || ' ' || u.last_name AS prescriber
        FROM prescriptions pr LEFT JOIN users u ON u.id = pr.prescribed_by WHERE pr.patient_id = $1 ORDER BY pr.created_at DESC`, [id]);
     out.prescriptions = rows.map(presentPrescription);
   }
@@ -108,7 +111,7 @@ router.get('/:id/history', requirePerm('patients.view'), ah(async (req, res) => 
       items: r.items.map(({ result, ...it }) => {
         if (!results) return { ...it, results_restricted: true };
         const x = decJson(result, {});
-        return { ...it, result_value: x.value ?? null, result_text: x.text ?? null, abnormal: x.abnormal ?? null };
+        return { ...it, result_value: x.value ?? null, result_text: x.text ?? null, abnormal: x.abnormal ?? null, flag: x.flag ?? null };
       }),
     }));
   }
@@ -123,6 +126,11 @@ router.get('/:id/history', requirePerm('patients.view'), ah(async (req, res) => 
       `SELECT a.id, a.scheduled_at, a.reason, a.status, d.first_name || ' ' || d.last_name AS doctor
        FROM appointments a LEFT JOIN users d ON d.id = a.doctor_id WHERE a.patient_id = $1 ORDER BY a.scheduled_at DESC`, [id]);
     out.appointments = rows.map((r) => ({ ...r, reason: canAppointmentDetails(u) ? decrypt(r.reason) : undefined }));
+  }
+  // Journal : l'historique contient des données médicales dès que l'utilisateur y a accès
+  if (can(u, 'patients.view_medical') || canClinical(u) || canPrescriptions(u) || canLabResults(u)) {
+    const { rows: [p] } = await query('SELECT id, patient_number FROM patients WHERE id = $1', [id]);
+    if (p) await logMedicalRead(req, { patientId: p.id, patientNumber: p.patient_number, access: 'historique' });
   }
   res.json(out);
 }));

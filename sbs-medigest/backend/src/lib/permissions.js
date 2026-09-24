@@ -16,6 +16,7 @@ export const PERMISSIONS = [
   ['consultations.vitals', 'Consultations', 'Saisir les constantes'],
   ['consultations.cancel', 'Consultations', 'Annuler une consultation'],
   ['prescriptions.create', 'Consultations', 'Rédiger des prescriptions'],
+  ['certificates.create', 'Consultations', 'Rédiger des certificats médicaux'],
   ['acts.perform', 'Actes', 'Enregistrer des actes / soins'],
   ['acts.manage', 'Actes', 'Gérer le catalogue et les tarifs des actes'],
 
@@ -50,6 +51,7 @@ export const PERMISSIONS = [
   ['lab.view', 'Laboratoire', 'Voir les demandes d\'examens'],
   ['lab.request', 'Laboratoire', 'Demander des examens'],
   ['lab.results', 'Laboratoire', 'Saisir les résultats'],
+  ['lab.validate', 'Laboratoire', 'Valider les résultats d\'examens'],
   ['lab.manage', 'Laboratoire', 'Gérer le catalogue d\'examens et tarifs'],
 
   ['reports.view', 'Rapports', 'Consulter les rapports et statistiques'],
@@ -89,7 +91,7 @@ export const DEFAULT_ROLES = [
     permissions: [
       'dashboard.view', 'patients.view', 'patients.view_medical', 'patients.create', 'patients.update',
       'consultations.view', 'consultations.create', 'consultations.update', 'consultations.diagnose',
-      'consultations.vitals', 'consultations.cancel', 'prescriptions.create', 'acts.perform',
+      'consultations.vitals', 'consultations.cancel', 'prescriptions.create', 'certificates.create', 'acts.perform',
       'appointments.view', 'appointments.manage', 'lab.view', 'lab.request', 'pharmacy.view',
     ],
   },
@@ -113,7 +115,7 @@ export const DEFAULT_ROLES = [
   {
     code: 'laborantin', name: 'Laborantin',
     description: 'Examens et résultats',
-    permissions: ['patients.view', 'lab.view', 'lab.results'],
+    permissions: ['patients.view', 'lab.view', 'lab.results', 'lab.validate'],
   },
   {
     code: 'pharmacien', name: 'Pharmacien',
@@ -132,13 +134,22 @@ export const DEFAULT_SETTINGS = {
     address: 'Siguiri, République de Guinée',
     phone: '',
     currency: 'GNF',
+    // Mentions légales à faire valider (docs/MODELES-DOCUMENTS.md)
+    city: 'Siguiri',
+    registration: '',      // n° d'autorisation d'ouverture / d'agrément du cabinet
+    tax_id: '',            // NIF
+    rccm: '',              // registre du commerce (si applicable)
+    legal_mentions: '',    // pied de page des documents (ex. « Médecin conventionné… »)
   },
-  security: { max_failed_logins: 5, lock_minutes: 15, failed_login_alert_threshold: 3 },
+  // max_failed_logins : échecs tolérés par source (identifiant + IP) ; account_lock_threshold : toutes sources (blocage temporaire)
+  security: { max_failed_logins: 5, lock_minutes: 15, failed_login_alert_threshold: 3, account_lock_threshold: 20 },
   finance: {
     expense_validation_threshold: 500000,  // dépenses ≥ ce montant : validation admin
     unusual_expense_threshold: 1500000,    // dépenses ≥ ce montant : alerte
     discount_alert_percent: 20,            // remise ≥ 20 % : alerte
     cash_tolerance: 0,                     // écart de caisse toléré sans alerte
+    cash_expense_daily_limit: 1000000,     // total des dépenses payées en espèces par jour (au-delà : propriétaire uniquement)
+    unpaid_sale_alert_hours: 24,           // vente de pharmacie non soldée depuis ce délai : alerte
   },
   stock: { expiry_warning_days: 60 },
   expense_categories: [

@@ -29,19 +29,36 @@ export const LABELS = {
     expiration: 'Expiration', inventaire: 'Inventaire', annulation_vente: 'Annulation vente',
   },
   category: { medicament: 'Médicament', consommable: 'Consommable', produit_medical: 'Produit médical' },
-  login_event: { login: 'Connexion', logout: 'Déconnexion', failed: 'Échec', locked: 'Verrouillé', disabled: 'Compte désactivé' },
+  login_event: { login: 'Connexion', logout: 'Déconnexion', failed: 'Échec', locked: 'Verrouillé', disabled: 'Compte désactivé', mfa_failed: 'Échec du code 2FA', expired: 'Session expirée (inactivité)' },
+  prescription_status: { en_attente: 'À délivrer', partielle: 'Partiellement délivrée', delivree: 'Délivrée' },
+  invoice_status: { emise: 'Émise', partielle: 'Partiellement payée', payee: 'Payée', annulee: 'Annulée' },
+  cert_type: { aptitude: 'Aptitude', inaptitude: 'Inaptitude', repos: 'Arrêt / repos', presence: 'Présence / consultation', autre: 'Autre' },
+  lab_flag: { haut: '↑ élevé', bas: '↓ bas' },
 };
 
 export const TONE = {
-  terminee: 'ok', payee: 'ok', valide: 'ok', validee: 'ok', honore: 'ok', resolue: 'ok', ok: 'ok',
+  terminee: 'ok', payee: 'ok', valide: 'ok', validee: 'ok', honore: 'ok', resolue: 'ok', ok: 'ok', delivree: 'ok', emise: 'warn',
   en_cours: 'info', confirme: 'info', en_verification: 'info', partielle: 'warn', planifie: 'info',
   en_attente: 'warn', demandee: 'warn', nouvelle: 'warn', faible: 'warn', moyenne: 'warn',
   annulee: 'muted', annule: 'muted', ignoree: 'muted', absent: 'muted',
   non_payee: 'danger', refusee: 'danger', rembourse: 'danger', epuise: 'danger', haute: 'danger',
 };
 
+/**
+ * Neutralise l'injection de formules (CSV/DDE) : une cellule texte commençant par
+ * = + - @ (ou tabulation / retour chariot, y compris après des espaces) serait
+ * interprétée comme une formule par Excel / LibreOffice ; elle est préfixée d'une apostrophe.
+ * Les nombres (type number) restent des nombres.
+ */
+export function csvSafe(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number' || typeof v === 'bigint') return String(v);
+  const s = String(v);
+  return /^[\s]*[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
 export function toCSV(rows, columns) {
-  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const esc = (v) => `"${csvSafe(v).replace(/"/g, '""')}"`;
   const head = columns.map((c) => esc(c.label)).join(';');
   const body = rows.map((r) => columns.map((c) => esc(typeof c.value === 'function' ? c.value(r) : r[c.value])).join(';'));
   return '﻿' + [head, ...body].join('\n');

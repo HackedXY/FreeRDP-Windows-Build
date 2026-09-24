@@ -38,7 +38,8 @@ test('mot de passe temporaire : changement obligatoire avant tout accès', async
 test('verrouillage après échecs répétés + alerte système', async () => {
   for (let i = 0; i < 5; i++) await login('temp01', 'mauvais-mdp-1');
   const r = await login('temp01', 'mauvais-mdp-1');
-  assert.equal(r.loginRes.status, 423);
+  // phase 4 : ralentissement générique (429), sans révéler l'état du compte
+  assert.equal(r.loginRes.status, 429);
   const alerts = (await admin.get('/api/alerts?type=connexion_echouee')).body.items;
   assert.ok(alerts.length >= 1);
 });
@@ -49,7 +50,9 @@ test('compte désactivé : accès impossible et session révoquée', async () =>
   await admin.put(`/api/users/${u.user.id}`).send({ status: 'disabled' });
   assert.equal((await u.get('/api/payments')).status, 401);
   const again = await login('caissier99', 'Employe2026x');
-  assert.equal(again.loginRes.status, 403);
+  // phase 4 : refus identique à un mot de passe erroné (l'état du compte n'est pas révélé)
+  assert.equal(again.loginRes.status, 401);
+  assert.equal(again.loginRes.body.error, 'Identifiant ou mot de passe incorrect.');
 });
 
 test('patients : création et principe du moindre privilège', async () => {

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { Server } from 'socket.io';
 import { parseCookie } from 'cookie';
-import { config } from './config.js';
+import { config, requireRuntimeKeys } from './config.js';
 import { createApp } from './app.js';
 import { migrate } from './db/migrate.js';
 import { seed } from './db/seed.js';
@@ -10,6 +10,7 @@ import { userFromToken, SESSION_COOKIE } from './lib/auth.js';
 import { connected, disconnected } from './lib/presence.js';
 import { checkExpiries } from './lib/stock.js';
 import { checkBackups } from './lib/backupmon.js';
+import { checkUnpaidSales } from './lib/receivables.js';
 import { tx, pool } from './db/pool.js';
 
 /**
@@ -49,8 +50,8 @@ export function attachRealtime(server) {
     try {
       const cookies = parseCookie(socket.handshake.headers.cookie || '');
       const token = cookies[SESSION_COOKIE] || socket.handshake.auth?.token;
-      const user = await userFromToken(token);
-      if (!user || user.mustChangePassword) return next(new Error('unauthorized'));
+      const user = await userFromToken(token, { touch: false });
+      if (!user || user.mustChangePassword || user.mfaSetupRequired) return next(new Error('unauthorized'));
       // aucun salon par permission : l'autorisation est vérifiée à chaque livraison
       socket.data = { userId: user.id, sessionId: user.sessionId, expiresAt: user.sessionExpiresAt, user, checkedAt: Date.now() };
       next();
@@ -69,6 +70,7 @@ async function runPeriodicChecks() {
   try {
     const ctx = makeContext({ deferred: false });
     await tx((db) => checkExpiries(db, ctx));
+    await tx((db) => checkUnpaidSales(db, ctx));
     if (config.backupMonitoring) await tx((db) => checkBackups(db, ctx, { maxAgeHours: config.backupMaxAgeHours }));
   } catch (e) { console.error('Contrôle périodique en échec :', e.message); }
 }
@@ -76,6 +78,7 @@ async function runPeriodicChecks() {
 async function main() {
   // Les migrations ne s'exécutent que si les identifiants propriétaire sont fournis
   // (service « migrate » en production ; jamais dans le conteneur applicatif).
+  requireRuntimeKeys(); // clés de chiffrement et d'audit : obligatoires pour l'application
   if (config.migrationDatabaseUrl) { await migrate(); await seed(); }
   await assertLeastPrivilege();
   const app = createApp();
