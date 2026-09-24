@@ -1,8 +1,8 @@
 {
-  "name": "sbs-backend",
+  "name": "sbs-medigest-api",
   "version": "1.0.0",
   "private": true,
-  "description": "API de la plateforme de gestion du Cabinet Médical SBS",
+  "description": "API de SBS MediGest — plateforme de gestion du Cabinet Médical SBS",
   "type": "module",
   "main": "src/server.js",
   "engines": {

@@ -1,4 +1,4 @@
-# Déploiement de la plateforme SBS sur un VPS (HTTPS)
+# Déploiement de SBS MediGest sur un VPS (HTTPS)
 
 Procédure pas à pas pour mettre la plateforme en ligne sur un serveur privé virtuel, avec certificat HTTPS
 automatique (Let's Encrypt), sauvegardes chiffrées hors serveur et accès restreint aux seuls ports 80/443.
@@ -34,7 +34,7 @@ Let's Encrypt ne délivrera le certificat qu'une fois le domaine pointé vers le
 
 ```bash
 ssh root@IP_DU_VPS
-curl -fsSLO https://raw.githubusercontent.com/<compte>/<depot>/<branche>/sbs-medical-platform/deploy/scripts/setup-vps.sh
+curl -fsSLO https://raw.githubusercontent.com/<compte>/<depot>/<branche>/sbs-medigest/deploy/scripts/setup-vps.sh
 less setup-vps.sh                     # relisez-le avant de l'exécuter
 sudo bash setup-vps.sh --harden-ssh   # --harden-ssh seulement si votre clé SSH est déjà installée
 ```
@@ -47,8 +47,8 @@ désactivation de la connexion SSH par mot de passe.
 
 ```bash
 su - sbs
-git clone -b <branche> https://github.com/<compte>/<depot>.git sbs-app
-cd sbs-app/sbs-medical-platform
+git clone -b <branche> https://github.com/<compte>/<depot>.git SBS-MediGest
+cd SBS-MediGest/sbs-medigest
 ```
 Dépôt privé : utilisez une **clé de déploiement en lecture seule** (GitHub → Settings → Deploy keys).
 
@@ -70,9 +70,9 @@ médicales, la clé de signature du journal d'audit et un mot de passe initial p
 
 **Sur le poste de confiance** (pas sur le VPS) — Node.js 20+ requis :
 ```bash
-cd sbs-medical-platform/backend
+cd sbs-medigest/backend
 BACKUP_KEY_PASSPHRASE='<phrase longue, notée au coffre>' node src/backup/keygen.js --out ./cles-sbs
-scp ./cles-sbs/backup-public.pem sbs@IP_DU_VPS:sbs-app/sbs-medical-platform/secrets/
+scp ./cles-sbs/backup-public.pem sbs@IP_DU_VPS:SBS-MediGest/sbs-medigest/secrets/
 # backup-private.pem reste sur le poste de confiance + copie au coffre
 ```
 
@@ -159,10 +159,10 @@ Chaque étape doit afficher ✔ (empreintes, authentification du chiffrement, jo
 
 ### Mettre à jour l'application
 ```bash
-cd ~/sbs-app && git fetch && git log --oneline HEAD..origin/<branche>   # relire les changements
-docker compose -f sbs-medical-platform/docker-compose.yml run --rm backup node src/backup/worker.js --once  # sauvegarde avant mise à jour
+cd ~/SBS-MediGest && git fetch && git log --oneline HEAD..origin/<branche>   # relire les changements
+docker compose -f sbs-medigest/docker-compose.yml run --rm backup node src/backup/worker.js --once  # sauvegarde avant mise à jour
 git pull
-cd sbs-medical-platform
+cd sbs-medigest
 docker compose build
 docker compose run --rm migrate      # migrations éventuelles
 docker compose up -d

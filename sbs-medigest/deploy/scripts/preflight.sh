@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contrôles AVANT la mise en service, à lancer sur le VPS depuis sbs-medical-platform/.
+# Contrôles AVANT la mise en service, à lancer sur le VPS depuis sbs-medigest/.
 # N'affiche aucun secret. Code de sortie ≠ 0 si un contrôle bloquant échoue.
 set -uo pipefail
 cd "$(dirname "$0")/../.."

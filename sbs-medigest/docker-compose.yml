@@ -1,5 +1,8 @@
 # Déploiement de production : docker compose up -d
 # Prérequis : fichier .env (voir .env.example) et un nom de domaine pointant vers le serveur.
+# Nom de projet fixe : volumes (pgdata, uploads…) indépendants du nom du dossier
+name: sbs-medigest
+
 # Journaux Docker bornés (évite de remplir le disque)
 x-logging: &logging
   driver: json-file

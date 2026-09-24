@@ -1,4 +1,6 @@
-# Plateforme SBS — Cabinet Médical Sounkaro Bakary Souaré (Siguiri)
+# SBS MediGest — Cabinet Médical Sounkaro Bakary Souaré (Siguiri)
+
+**SBS MediGest** est la plateforme de gestion médicale du Cabinet Médical SBS.
 
 Plateforme web responsive (ordinateur, tablette, smartphone) de gestion intégrée et de supervision en temps réel du cabinet :
 patients, consultations, actes, examens, prescriptions, paiements, caisse, dépenses, pharmacie, stock, employés, rendez-vous, rapports,
